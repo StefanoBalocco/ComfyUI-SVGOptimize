@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="210mm"
+   height="297mm"
+   viewBox="0 0 210 297"
+   version="1.1"
+   id="svg5"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   sodipodi:docname="drawing.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <sodipodi:namedview
+     id="namedview7"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:zoom="0.7"
+     inkscape:cx="400"
+     inkscape:cy="560"
+     inkscape:current-layer="layer1" />
+  <title id="title1">Test drawing</title>
+  <defs
+     id="defs2">
+    <linearGradient
+       id="linearGradient100"
+       inkscape:collect="always">
+      <stop
+         style="stop-color:#ff0000;stop-opacity:1"
+         offset="0"
+         id="stop96" />
+      <stop
+         style="stop-color:#0000ff;stop-opacity:1"
+         offset="1"
+         id="stop98" />
+    </linearGradient>
+    <linearGradient
+       id="linearGradient200">
+      <stop
+         style="stop-color:#00ff00;stop-opacity:1"
+         offset="0"
+         id="stop202" />
+    </linearGradient>
+    <rect
+       id="rect300"
+       width="20"
+       height="10"
+       x="0"
+       y="0"
+       style="fill:#336699;stroke:none;fill-rule:evenodd;stroke-linecap:square;stroke-width:1pt;stroke-opacity:1;fill-opacity:1" />
+  </defs>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(10,20)">
+    <g
+       id="g400">
+      <g
+         id="g402">
+        <path
+           style="fill:#ff8800;stroke:none;fill-rule:evenodd;stroke-linecap:square;stroke-width:1pt;stroke-opacity:1;fill-opacity:1"
+           d="M 10,10 H 60 V 60 H 10 Z"
+           id="path404" />
+        <path
+           style="fill:url(#linearGradient100);stroke:none;fill-rule:evenodd;stroke-linecap:square;stroke-width:1pt;stroke-opacity:1;fill-opacity:1"
+           d="m 70,10 c 10,0 20,10 20,20 0,10 -10,20 -20,20 z"
+           id="path406" />
+      </g>
+    </g>
+    <use
+       xlink:href="#rect300"
+       id="use500"
+       x="100"
+       y="10" />
+    <rect
+       style="fill:#00aa00;stroke:#000000;fill-rule:evenodd;stroke-linecap:square;stroke-width:1pt;stroke-opacity:1;fill-opacity:1"
+       id="rect600"
+       width="40"
+       height="30"
+       x="10"
+       y="100" />
+  </g>
+  <metadata
+     id="metadata9">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+</svg>

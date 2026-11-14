@@ -1,0 +1,2 @@
+# Parses and writes SVG
+lxml>=5.0

@@ -1,0 +1,7 @@
+[project]
+name = "comfyui-svgoptimize"
+version = "1.0.0"
+description = "Lossless SVG optimizer node for ComfyUI"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+dependencies = ["lxml>=5.0"]
