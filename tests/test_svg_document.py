@@ -4,7 +4,7 @@ from lxml import etree
 
 import package_alias  # noqa: F401
 from helpers import S, opt, run
-from svgoptimize.svg_document import SVG_NS, Facts, clean_document, document_facts, element_cost, elements, local_name, parse_svg, serialize
+from svgoptimize.svg_document import SVG_NS, Facts, clean_document, declared, defined_ids, document_facts, element_cost, elements, local_name, parse_svg, serialize
 from svgoptimize.svg_optimize import optimize_svg
 
 SODIPODI = 'xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"'
@@ -32,6 +32,12 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(run(clean_document, doc, True), f'<svg {S}><title>T</title><desc>D</desc><metadata>{{"a": "&lt;&amp;>"}}</metadata></svg>')
         self.assertEqual(opt(doc), f'<svg {S}/>')
         self.assertEqual(opt(doc, True), f'<svg {S}><title>T</title><desc>D</desc><metadata>{{"a": "&lt;&amp;>"}}</metadata></svg>')
+
+    def test_switch_children_kept(self):
+        for body in ('<desc>d</desc>', '<title>t</title>', '<metadata/>'):
+            doc = f'<svg {S}><switch>{body}<path d="M0 0h1"/></switch></svg>'
+            with self.subTest(body):
+                self.assertEqual(run(clean_document, doc, False), doc)
 
     def test_metadata_namespaces_kept_inside_metadata(self):
         rdf = 'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"'
@@ -129,3 +135,20 @@ class SerializeTests(unittest.TestCase):
         root, _ = parse_svg(f'<svg {S}><path d="M0 0h1" fill="red"/></svg>'.encode())
         self.assertEqual(element_cost(root[0]), len('<path d="M0 0h1" fill="red">'))
         self.assertEqual(element_cost(root), len(f'<svg {S}>'))
+
+
+class LookupTests(unittest.TestCase):
+    def test_declared(self):
+        root, _ = parse_svg(f'<svg {S}><path style="fill:red;fill: blue" stroke=" red "/><path style="/*x*/"/><path fill=" red"/></svg>'.encode())
+        first, second, third = list(root)
+        self.assertEqual(declared(first, "fill"), "blue")
+        self.assertEqual(declared(first, "stroke"), " red ")
+        self.assertIsNone(declared(second, "fill"))
+        self.assertEqual(declared(third, "fill"), " red")
+        self.assertEqual(declared(third, "stroke"), "")
+
+    def test_defined_ids_first_wins(self):
+        root, _ = parse_svg(f'<svg {S}><path id="a"/><g><path id="a"/><path id="b"/></g></svg>'.encode())
+        defined = defined_ids(root)
+        self.assertEqual(list(defined), ["a", "b"])
+        self.assertIs(defined["a"], root[0])

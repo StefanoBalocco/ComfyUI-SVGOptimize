@@ -87,6 +87,8 @@ RGB_INTEGERS = re.compile(r"rgb\([ \t\n\r\f]*([0-9]+)[ \t\n\r\f]*,[ \t\n\r\f]*([
 PERCENT = rf"({NUMBER.pattern})%"
 RGB_PERCENTS = re.compile(rf"rgb\([ \t\n\r\f]*{PERCENT}[ \t\n\r\f]*,[ \t\n\r\f]*{PERCENT}[ \t\n\r\f]*,[ \t\n\r\f]*{PERCENT}[ \t\n\r\f]*\)", re.IGNORECASE)
 LENGTH = re.compile(rf"({NUMBER.pattern})(px|%|[a-zA-Z]+)?")
+ZERO_LENGTH = re.compile(r"[+-]?0*\.?0+(?:px|%|em|ex|in|cm|mm|pt|pc)?")
+CSS_SPACE = " \t\r\n\f"
 IMPORTANT = re.compile(r"![ \t\n\r\f]*important", re.IGNORECASE)
 
 KEYWORDS_BY_HEX = {}
@@ -137,9 +139,13 @@ def shortest_color(text):
     return min(candidates)[2]
 
 
+def is_zero_length(text):
+    return ZERO_LENGTH.fullmatch(text) is not None
+
+
 def shortest_length(text):
     match = LENGTH.fullmatch(text.strip())
-    if match is None:
+    if match is None or re.search(r"\.(?![0-9])", match.group(1)):
         return text
     number, unit = match.groups()
     return format_number(parse_number(number)) + ("" if unit == "px" else unit or "")
@@ -167,11 +173,11 @@ def parse_style(text):
         elif char == ";" and depth == 0:
             declaration = text[start:index]
             start = index + 1
-            if not declaration.strip():
+            if not declaration.strip(CSS_SPACE):
                 continue
             name, colon, value = declaration.partition(":")
-            name = name.strip().lower()
-            value = value.strip()
+            name = name.strip(CSS_SPACE).lower()
+            value = value.strip(CSS_SPACE)
             if not colon or not name or not value:
                 return None
             declarations.append((name, value))

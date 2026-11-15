@@ -44,6 +44,8 @@ class LengthStyleTests(unittest.TestCase):
         self.assertEqual(parse_style("fill:url(data:a;b)"), [("fill", "url(data:a;b)")])
         self.assertEqual(parse_style("FILL:red;;"), [("fill", "red")])
         self.assertEqual(parse_style(""), [])
+        self.assertEqual(parse_style("display:\xa0none"), [("display", "\xa0none")])
+        self.assertEqual(parse_style("\fdisplay:\fnone\f"), [("display", "none")])
         for bad in ("fill:red !important", "/*x*/fill:red", "fill", "fill:red ! IMPORTANT", "fill:", ":red",
                     "fill:red;stroke: ", "font-family:\\41", "fill:url(a", "fill:a)", "font-family:'a;b"):
             self.assertIsNone(parse_style(bad), bad)

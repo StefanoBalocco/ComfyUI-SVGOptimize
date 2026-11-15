@@ -1,9 +1,9 @@
 """Attribute rewrites: style to presentation attributes, shortest values, compact geometry, default removal."""
 from decimal import Decimal
 
-from .svg_document import NAME, element_cost, local_name, style_sets, svg_elements, use_targets
+from .svg_document import HREFS, NAME, element_cost, local_name, style_sets, svg_elements, use_targets
 from .svg_numbers import NUMBER, SEPARATOR, SPACE, format_number, parse_number
-from .svg_path import format_path, parse_path
+from .svg_path import rewrite_path
 from .svg_transform import format_transform, parse_transform
 from .svg_values import (COLOR_PROPERTIES, GEOMETRY_DEFAULTS, INHERITED_DEFAULTS, LENGTH_ATTRIBUTES, OTHER_DEFAULTS,
                          PRESENTATION_ATTRIBUTES, format_style, is_default, parse_style, shortest_color,
@@ -43,7 +43,7 @@ def clean_values(root):
                 declarations = parse_style(value)
                 if declarations is not None:
                     value = format_style([(key, shortest_color(item) if key in COLOR_PROPERTIES else item) for key, item in declarations])
-            if value == "" and name not in CONDITIONAL and not name.startswith("{"):
+            if value == "" and name not in CONDITIONAL and not name.startswith("{") and not (name in TRANSFORMS[1:] and any(href in element.attrib for href in HREFS)):
                 del element.attrib[name]
             else:
                 element.set(name, value)
@@ -65,18 +65,19 @@ def number_list(text):
     return values or None
 
 
-def format_geometry(root):
+def format_geometry(root, written):
     for element in svg_elements(root):
         if local_name(element) == "path" and "d" in element.attrib:
             d = element.get("d")
-            segments = parse_path(d)
-            text = None if segments is None else format_path(segments)
+            text = rewrite_path(d, written)
             if text is not None and len(text) <= len(d):
                 element.set("d", text)
         for name in TRANSFORMS:
             items = parse_transform(element.get(name)) if name in element.attrib else None
             if items is not None:
                 text = format_transform(items)
+                if not text and name != "transform" and any(href in element.attrib for href in HREFS):
+                    text = "scale(1)"
                 if text:
                     element.set(name, text)
                 else:

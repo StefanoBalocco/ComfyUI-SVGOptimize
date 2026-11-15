@@ -2,11 +2,13 @@ import random
 import re
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
 import package_alias  # noqa: F401
-from svgoptimize.svg_path import format_path, parse_path, translate_path
+from svgoptimize.svg_path import format_path, parse_path, rewrite_path, translate_path
 
 D = Decimal
+FIXTURES = Path(__file__).parent / "fixtures"
 ARGUMENTS = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7, "Z": 0}
 
 
@@ -117,6 +119,21 @@ class FormatTests(unittest.TestCase):
             text = format_path(segments)
             self.assertEqual(parse_path(text), segments, d)
             self.assertEqual(format_path(parse_path(text)), text, d)
+
+    def test_rewrite_path_remembers(self):
+        written = {}
+        self.assertEqual(rewrite_path("M 10 10 L 20 10", written), "M10 10h10")
+        self.assertEqual(written, {"M 10 10 L 20 10": "M10 10h10", "M10 10h10": "M10 10h10"})
+        self.assertIsNone(rewrite_path("M0 0 X", written))
+        self.assertEqual(rewrite_path("X", {"X": "Y"}), "Y")
+
+    def test_writing_is_idempotent(self):
+        for name in ("vtracer", "starvector", "inkscape", "styled"):
+            for d in re.findall(r'\bd="([^"]*)"', (FIXTURES / f"{name}.svg").read_text()):
+                segments = parse_path(d)
+                if segments is not None:
+                    text = format_path(segments)
+                    self.assertEqual(format_path(parse_path(text)), text, d)
 
 
 if __name__ == "__main__":

@@ -14,28 +14,43 @@ def parse_number(text):
     return Decimal(text)
 
 
-def format_number(value):
-    if value == 0:
-        return "0"
+def scientific(value):
     sign, digits, exponent = value.as_tuple()
     digits = "".join(map(str, digits))
     stripped = digits.rstrip("0")
     exponent += len(digits) - len(stripped)
-    digits = stripped
-    sign = "-" if sign else ""
-    if exponent >= 0:
-        positional = len(digits) + exponent
-    elif -exponent >= len(digits):
-        positional = 1 - exponent
-    else:
-        positional = len(digits) + 1
-    if len(digits) + 1 + len(str(exponent)) < positional:
-        return f"{sign}{digits}e{exponent}"
-    if exponent >= 0:
-        return sign + digits + "0" * exponent
-    if -exponent >= len(digits):
-        return sign + "." + "0" * (-exponent - len(digits)) + digits
-    return sign + digits[:exponent] + "." + digits[exponent:]
+    return f"{'-' if sign else ''}{stripped}e{exponent}"
+
+
+def format_number(value):
+    if value == 0:
+        return "0"
+    if abs(value.adjusted()) > 100000:
+        # compare lengths first so that huge plain text is only built when it is the shorter form
+        short = scientific(value)
+        digits, exponent = short.lstrip("-").split("e")
+        digits, exponent = len(digits), int(exponent)
+        if exponent >= 0:
+            plain = digits + exponent
+        elif -exponent >= digits:
+            plain = 1 - exponent
+        else:
+            plain = digits + 1
+        if len(short) < plain + (value < 0):
+            return short
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text.startswith("0."):
+        text = text[1:]
+    elif text.startswith("-0."):
+        text = "-" + text[2:]
+    unsigned = text.lstrip("-")
+    if (unsigned.endswith("000") and "." not in unsigned) or unsigned.startswith(".000"):
+        short = scientific(value)
+        if len(short) < len(text):
+            return short
+    return text
 
 
 def separator(previous, following):

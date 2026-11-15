@@ -30,16 +30,37 @@ class AttributeTests(unittest.TestCase):
 
     def test_geometry(self):
         self.assertEqual(run(format_geometry, f'<svg {S} viewBox=" 0,0 , 10.0 10 "><path d="M 10 10 L 20 10" transform="translate(0,0)"/>'
-                                              '<polygon points="0,0 10,0 10,10" stroke-dasharray="5, 3.0"/><path d="M0 0 X"/></svg>'),
+                                              '<polygon points="0,0 10,0 10,10" stroke-dasharray="5, 3.0"/><path d="M0 0 X"/></svg>', {}),
                          f'<svg {S} viewBox="0 0 10 10"><path d="M10 10h10"/><polygon points="0 0 10 0 10 10" stroke-dasharray="5 3"/><path d="M0 0 X"/></svg>')
 
+    def test_identity_transform_kept_with_href(self):
+        for before, after in (('<linearGradient id="b" href="#a" gradientTransform="scale(1)"/>', '<linearGradient id="b" href="#a" gradientTransform="scale(1)"/>'),
+                              ('<pattern id="b" href="#a" patternTransform="translate(0 0)"/>', '<pattern id="b" href="#a" patternTransform="scale(1)"/>'),
+                              ('<linearGradient id="b" href="#a" gradientTransform=" "/>', '<linearGradient id="b" href="#a" gradientTransform="scale(1)"/>'),
+                              ('<linearGradient id="b" href="#a" gradientTransform="scale(2)"/>', '<linearGradient id="b" href="#a" gradientTransform="scale(2)"/>'),
+                              ('<linearGradient id="b" gradientTransform="scale(1)"/>', '<linearGradient id="b"/>')):
+            with self.subTest(before):
+                self.assertEqual(run(format_geometry, f'<svg {S}>{before}</svg>', {}), f'<svg {S}>{after}</svg>')
+        doc = f'<svg {S} {X}><linearGradient id="b" xlink:href="#a" gradientTransform="rotate(0)"/></svg>'
+        self.assertIn('gradientTransform="scale(1)"', run(format_geometry, doc, {}))
+
+    def test_css_invalid_lengths_kept(self):
+        doc = f'<svg {S}><path d="M0 0h1" stroke-width="0."/><circle r="5."/></svg>'
+        self.assertEqual(run(clean_values, doc), doc)
+        self.assertIn('stroke-width="0."', opt(f'<svg {S}><g stroke="#00f"><path d="M2 9h30" stroke-width="0."/></g></svg>'))
+
+    def test_empty_transform_kept_with_href(self):
+        doc = (f'<svg {S}><defs><linearGradient id="a" gradientTransform="scale(2)"><stop offset="0"/><stop offset="1" stop-color="red"/></linearGradient>'
+               '<linearGradient id="b" href="#a" gradientTransform=""/></defs><path d="M0 0h1" fill="url(#b)"/></svg>')
+        self.assertEqual(opt(doc).count("gradientTransform="), 2)
+
     def test_number_lists(self):
-        self.assertEqual(run(format_geometry, f'<svg {S} viewBox="0,-5 10,10"><polygon points="0,-5 .5,.5"/></svg>'),
+        self.assertEqual(run(format_geometry, f'<svg {S} viewBox="0,-5 10,10"><polygon points="0,-5 .5,.5"/></svg>', {}),
                          f'<svg {S} viewBox="0 -5 10 10"><polygon points="0 -5 .5 .5"/></svg>')
-        self.assertEqual(run(format_geometry, f'<svg {S}><polygon points="0-5 1.5.5"/></svg>'), f'<svg {S}><polygon points="0 -5 1.5 .5"/></svg>')
+        self.assertEqual(run(format_geometry, f'<svg {S}><polygon points="0-5 1.5.5"/></svg>', {}), f'<svg {S}><polygon points="0 -5 1.5 .5"/></svg>')
         for value in ("5px 3", "5%", "none", "1,,2", "1 2,", "a"):
             doc = f'<svg {S}><path d="M0 0h1" stroke-dasharray="{value}"/></svg>'
-            self.assertEqual(run(format_geometry, doc), doc, value)
+            self.assertEqual(run(format_geometry, doc, {}), doc, value)
 
     def test_defaults(self):
         self.assertEqual(run(remove_defaults, f'<svg {S}><path d="M0 0h1" fill="black" stroke="none" opacity="1"/><rect x="0" width="1" height="1"/></svg>', False),

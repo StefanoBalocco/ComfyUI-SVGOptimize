@@ -9,7 +9,10 @@ class FormatNumberTests(unittest.TestCase):
     def test_shortest_text(self):
         cases = {"0.500": ".5", "-0.5": "-.5", "10.0": "10", "-0": "0", "0": "0",
                  "1000": "1e3", "100": "100", "12000": "12e3", "1.5e3": "1500",
-                 "0.0001": "1e-4", "0.001": ".001", "0.00015": "15e-5", "123.456": "123.456"}
+                 "0.0001": "1e-4", "0.001": ".001", "0.00015": "15e-5", "123.456": "123.456",
+                 "-1000": "-1e3", "-0.0001": "-1e-4", "0.00012": "12e-5", "0.000123456": "123456e-9",
+                 "0.0001234567": ".0001234567", "1234000": "1234e3", "1E+3": "1e3", "5E-1": ".5",
+                 "0E+5": "0", "1.000": "1"}
         for text, expected in cases.items():
             self.assertEqual(format_number(Decimal(text)), expected, text)
 
@@ -20,6 +23,7 @@ class FormatNumberTests(unittest.TestCase):
             result = format_number(Decimal(text))
             self.assertEqual(result, expected)
             self.assertEqual(Decimal(result), Decimal(text))
+        self.assertEqual(format_number(Decimal("1" * 100005)), "1" * 100005)
 
 
 class SeparatorTests(unittest.TestCase):

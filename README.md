@@ -35,6 +35,12 @@ Ids and definitions:
 
 - Ids that nothing references are removed, and referenced ids get the shortest free names, most referenced first.
 - Definitions that nothing references (gradients, patterns, clip paths, masks, markers, symbols, filters, anything inside `<defs>`) are removed, as are empty `<defs>` and empty groups.
+- Direct children of `<switch>` stay.
+
+Elements that draw nothing:
+
+- Shapes, groups, links, switches, text and nested `svg` elements with `display:none` are removed when nothing outside them references them.
+- Zero-size shapes (a `rect` with zero width or height, a `circle` with zero `r`, an `ellipse` with zero `rx` or `ry`, a `path` without `d`, a `polyline` without `points`) are removed when nothing outside them references them.
 
 Groups:
 
@@ -55,7 +61,7 @@ Path data:
 
 Transforms:
 
-- `translate(x 0)`, `scale(s s)`, `rotate(a 0 0)`, `matrix(1 0 0 1 x y)` and `matrix(a 0 0 d 0 0)` take their shorter forms, and identity transforms are removed.
+- `translate(x 0)`, `scale(s s)`, `rotate(a 0 0)`, `matrix(1 0 0 1 x y)` and `matrix(a 0 0 d 0 0)` take their shorter forms, and identity transforms are removed, except `gradientTransform` and `patternTransform` on an element with `href`, which become `scale(1)`.
 - A single `translate` on a shape is applied to its coordinates when that is shorter and no `url()` reference applies to the element or its ancestors.
 
 Attributes and values:
@@ -66,6 +72,8 @@ Attributes and values:
 - Empty attributes are removed, except conditional processing attributes.
 - Default values of presentation and geometry attributes are removed, in attributes and in `style`.
 - `style` declarations become presentation attributes when shorter.
+- A `fill` or `stroke` that references a `linearGradient` with one opaque stop and `userSpaceOnUse` units, and an invertible or no `gradientTransform`, takes the stop color. The stop, units and transform may come through `href`.
+- On a shape with `stroke-width` 0, the other stroke properties are removed, and `stroke-width` too when no ancestor or `<use>` can give the shape a stroke.
 
 Serialization:
 
@@ -77,6 +85,10 @@ Documents with a stylesheet (`<style>` or `xml-stylesheet`), a script, SMIL anim
 
 - With a stylesheet, script or SMIL animation, ids and definitions are kept, and with a stylesheet or SMIL animation groups are kept.
 - With a stylesheet, shapes keep their element names, `style` declarations stay in `style`, inherited defaults stay, and translates stay in `transform`.
+- With a stylesheet, script or SMIL animation, and in documents with `foreignObject`, gradient references stay.
+- With a stylesheet, script or SMIL animation, and in documents with `foreignObject`, hidden and zero-size elements stay. Children of `switch`, elements under `filter`, `mask` or `clip-path`, elements inside a `<use>` target, hidden elements inside text content, and elements containing kept metadata stay too.
+- With a marker property, hidden paths, lines, polylines and polygons stay.
+- With a marker property, stroke properties of zero-width strokes stay.
 - Inherited defaults inside a subtree that a `<use>` references stay.
 - Translates stay in `transform` with SMIL animation elements and on elements a `<use>` references, directly or through an ancestor.
 

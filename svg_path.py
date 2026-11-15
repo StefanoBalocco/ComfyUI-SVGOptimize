@@ -149,3 +149,13 @@ def translate_path(segments, dx, dy):
         return [(command, shift(command, values, dx, dy)) for command, values in segments]
     except Inexact:
         return None
+
+
+def rewrite_path(d, written):
+    if d not in written:
+        segments = parse_path(d)
+        text = None if segments is None else format_path(segments)
+        written[d] = text
+        if text is not None:
+            written[text] = text
+    return written[d]

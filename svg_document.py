@@ -9,6 +9,7 @@ from .svg_values import format_style, parse_style
 SVG_NS = "http://www.w3.org/2000/svg"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
+HREFS = ("href", f"{{{XLINK_NS}}}href")
 
 METADATA_NS = {
     "http://purl.org/dc/elements/1.1/",
@@ -86,10 +87,41 @@ def style_sets(element, names):
     return declarations is None or any(name in names for name, _ in declarations)
 
 
+def has_foreign_object(root):
+    return any(local_name(element) == "foreignObject" for element in elements(root))
+
+
+def is_switch_child(element):
+    parent = element.getparent()
+    return parent is not None and namespace(parent) == SVG_NS and local_name(parent) == "switch"
+
+
+def defined_ids(root):
+    """The first element for each id."""
+    defined = {}
+    for element in elements(root):
+        if "id" in element.attrib:
+            defined.setdefault(element.get("id"), element)
+    return defined
+
+
+def declared(element, name):
+    """The value of the last `name` declaration in the style, else of the attribute; None when the style cannot be parsed."""
+    return declared_in(element, name, parse_style(element.get("style", "")))
+
+
+def declared_in(element, name, declarations):
+    """`declared` for the already parsed style of the element."""
+    if declarations is None:
+        return None
+    values = [value for key, value in declarations if key == name]
+    return values[-1] if values else element.get(name, "")
+
+
 def use_targets(root):
     """The ids that a `use` element refers to."""
     return {href[1:] for element in svg_elements(root) if local_name(element) == "use"
-            for href in (element.get("href"), element.get(f"{{{XLINK_NS}}}href")) if href and href.startswith("#")}
+            for href in map(element.get, HREFS) if href and href.startswith("#")}
 
 
 def svg_elements(root):
@@ -131,7 +163,7 @@ def clean_document(root, keep_metadata):
                 remove_node(child)
         is_svg = namespace(element) == SVG_NS
         name = local_name(element)
-        if is_svg and not keep_metadata and name in ("metadata", "title", "desc"):
+        if is_svg and not keep_metadata and name in ("metadata", "title", "desc") and not is_switch_child(element):
             remove_node(element)
             continue
         inside_metadata = None

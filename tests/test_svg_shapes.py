@@ -1,7 +1,7 @@
 import unittest
 
 from helpers import S, X, opt, run
-from svgoptimize.svg_shapes import apply_translates, convert_shapes
+from svgoptimize.svg_shapes import apply_translates, convert_shapes, remove_zero_width_strokes
 
 
 class ShapeTests(unittest.TestCase):
@@ -38,19 +38,19 @@ class ShapeTests(unittest.TestCase):
         doc = f'<svg {S}><rect x="1" y="1" width="50" height="50" style="width:5px"/></svg>'
         self.assertEqual(run(convert_shapes, doc), doc)
         doc = f'<svg {S}><circle cx="1" cy="2" r="3" style="cx:5px" transform="translate(10)"/></svg>'
-        self.assertEqual(run(apply_translates, doc), doc)
+        self.assertEqual(run(apply_translates, doc, {}), doc)
         doc = f'<svg {S}><path d="M0 0h1" style="d:none" transform="translate(5)"/></svg>'
-        self.assertEqual(run(apply_translates, doc), doc)
+        self.assertEqual(run(apply_translates, doc, {}), doc)
 
     def test_style_d_and_transform_keep_shapes(self):
         doc = f'<svg {S}><polyline points="0 0 1 1 2 2" style="d:none"/></svg>'
         self.assertEqual(run(convert_shapes, doc), doc)
         doc = f'<svg {S}><path d="M0 0h1" style="transform:translate(5px)" transform="translate(5)"/></svg>'
-        self.assertEqual(run(apply_translates, doc), doc)
+        self.assertEqual(run(apply_translates, doc, {}), doc)
 
     def test_cost_increase_restores(self):
         doc = f'<svg {S}><polyline points="0 0 1 1 2 2 3 3 4 4 5 5" stroke="red" transform="translate(0.123456789012)"/></svg>'
-        self.assertEqual(run(apply_translates, doc), doc)
+        self.assertEqual(run(apply_translates, doc, {}), doc)
 
     def test_default_namespace_prefix(self):
         doc = (f'<svg xmlns:svg="http://www.w3.org/2000/svg" {S}><rect x="1" y="1" width="50" height="50"/>'
@@ -60,19 +60,19 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(opt(once), once)
 
     def test_translate(self):
-        self.assertEqual(run(apply_translates, f'<svg {S}><path d="M0 0C1 1 2 2 3 3Z" fill="#FDEDE8" transform="translate(262,667)"/></svg>'),
+        self.assertEqual(run(apply_translates, f'<svg {S}><path d="M0 0C1 1 2 2 3 3Z" fill="#FDEDE8" transform="translate(262,667)"/></svg>', {}),
                          f'<svg {S}><path d="M262 667c1 1 2 2 3 3z" fill="#FDEDE8"/></svg>')
-        self.assertEqual(run(apply_translates, f'<svg {S}><circle cx="1" cy="2" r="3" transform="translate(10)"/></svg>'),
+        self.assertEqual(run(apply_translates, f'<svg {S}><circle cx="1" cy="2" r="3" transform="translate(10)"/></svg>', {}),
                          f'<svg {S}><circle cx="11" cy="2" r="3"/></svg>')
-        self.assertEqual(run(apply_translates, f'<svg {S}><rect width="5" height="5" transform="translate(5)"/></svg>'),
+        self.assertEqual(run(apply_translates, f'<svg {S}><rect width="5" height="5" transform="translate(5)"/></svg>', {}),
                          f'<svg {S}><rect width="5" height="5" x="5"/></svg>')
-        self.assertEqual(run(apply_translates, f'<svg {S}><polygon points="0 0 10 0 10 10" transform="translate(1 2)"/></svg>'),
+        self.assertEqual(run(apply_translates, f'<svg {S}><polygon points="0 0 10 0 10 10" transform="translate(1 2)"/></svg>', {}),
                          f'<svg {S}><polygon points="1 2 11 2 11 12"/></svg>')
         for doc in (f'<svg {S}><g fill="url(#g)"><path d="M0 0h1" transform="translate(5)"/></g></svg>',
                     f'<svg {S}><path d="M0 0h1" style="fill:url(#g)" transform="translate(5)"/></svg>',
                     f'<svg {S}><path d="M0 0h1" transform="translate(5) scale(2)"/></svg>',
                     f'<svg {S}><rect width="5" height="5" x="10%" transform="translate(5)"/></svg>'):
-            self.assertEqual(run(apply_translates, doc), doc)
+            self.assertEqual(run(apply_translates, doc, {}), doc)
 
     def test_translate_kept_under_use_with_user_space_paint(self):
         paint = '<linearGradient id="g" gradientUnits="userSpaceOnUse" x2="10"><stop offset="0"/><stop offset="1" stop-color="red"/></linearGradient>'
@@ -80,18 +80,59 @@ class ShapeTests(unittest.TestCase):
                        '<g id="p"><path transform="translate(50 50)" d="M0 0h10v10H0z"/></g>',
                        '<symbol id="p"><path transform="translate(50 50)" d="M0 0h10v10H0z"/></symbol>'):
             doc = f'<svg {S} {X}><defs>{paint}{target}</defs><use xlink:href="#p" fill="url(#g)"/></svg>'
-            self.assertEqual(run(apply_translates, doc), doc)
+            self.assertEqual(run(apply_translates, doc, {}), doc)
             self.assertIn('transform="translate(50 50)"', opt(doc))
 
     def test_url_function_name_is_case_insensitive(self):
         doc = f'<svg {S}><path d="M0 0h1" fill="URL(#g)" transform="translate(5)"/></svg>'
-        self.assertEqual(run(apply_translates, doc), doc)
+        self.assertEqual(run(apply_translates, doc, {}), doc)
 
     def test_animation_keeps_translate(self):
         self.assertIn('transform="translate(5)"', opt(f'<svg {S}><path d="M0 0h1" transform="translate(5)"><animate attributeName="fill" to="red"/></path></svg>'))
 
     def test_optimize_bakes_translate(self):
         self.assertIn('d="M5 0h1"', opt(f'<svg {S}><path d="M0 0h1" transform="translate(5)"/></svg>'))
+
+
+class ZeroWidthStrokeTests(unittest.TestCase):
+    def test_removed(self):
+        cases = [
+            ('<path d="M0 0h1" stroke="#123456" stroke-width="0" stroke-linejoin="round" stroke-dasharray="1 2" fill="red"/>',
+             '<path d="M0 0h1" fill="red"/>'),
+            ('<path d="M0 0h1" style="fill:red;stroke:#123456;stroke-width:0px;stroke-opacity:.5"/>',
+             '<path d="M0 0h1" style="fill:red"/>'),
+            ('<path d="M0 0h1" stroke="red" stroke-width="2" style="stroke-width:0"/>', '<path d="M0 0h1"/>'),
+            ('<g stroke="blue"><path d="M0 0h1" stroke="red" stroke-width="0" stroke-linecap="round"/></g>',
+             '<g stroke="blue"><path d="M0 0h1" stroke-width="0"/></g>'),
+            ('<defs><path id="p" d="M0 0h1" stroke="red" stroke-width="0"/></defs><use href="#p" stroke="blue"/>',
+             '<defs><path id="p" d="M0 0h1" stroke-width="0"/></defs><use href="#p" stroke="blue"/>'),
+            ('<g style="stroke:blue"><path d="M0 0h1" stroke="red" stroke-width="0"/></g>',
+             '<g style="stroke:blue"><path d="M0 0h1" stroke-width="0"/></g>'),
+            ('<g style="/*c*/fill:red"><path d="M0 0h1" stroke="red" stroke-width="0"/></g>',
+             '<g style="/*c*/fill:red"><path d="M0 0h1" stroke-width="0"/></g>'),
+            ('<defs><g id="a"><path d="M0 0h1" stroke="red" stroke-width="0"/></g></defs><use href="#a" stroke="blue"/>',
+             '<defs><g id="a"><path d="M0 0h1" stroke-width="0"/></g></defs><use href="#a" stroke="blue"/>'),
+        ]
+        for before, after in cases:
+            with self.subTest(before):
+                self.assertEqual(run(remove_zero_width_strokes, f'<svg {S}>{before}</svg>'), f'<svg {S}>{after}</svg>')
+
+    def test_unchanged(self):
+        for doc in ('<marker id="m"/><path d="M0 0h1" stroke="red" stroke-width="0" marker-end="url(#m)"/>',
+                    '<g stroke="red" stroke-width="0"><path d="M0 0h1" stroke-width="2"/></g>',
+                    '<text stroke="red" stroke-width="0">a</text>',
+                    '<path d="M0 0h1" stroke="red" stroke-width=".1"/>',
+                    '<g stroke="#00f"><path d="M2 9h30" stroke-width="0."/></g>',
+                    '<path d="M2 9h30" stroke="#00f" stroke-width="0foo"/>',
+                    '<path d="M2 9h30" stroke="#00f" stroke-width=" 0"/>',
+                    '<path d="M0 0h1" stroke="red" stroke-width="0" style="stroke-width:2"/>',
+                    '<path d="M0 0h1" stroke="red" stroke-width="0" style="/*x*/fill:red"/>'):
+            with self.subTest(doc):
+                text = f'<svg {S}>{doc}</svg>'
+                self.assertEqual(run(remove_zero_width_strokes, text), text)
+
+    def test_stylesheet_keeps_stroke(self):
+        self.assertIn('stroke="red"', opt(f'<svg {S}><style>path{{stroke-width:2}}</style><path d="M0 0h1" stroke="red" stroke-width="0"/></svg>'))
 
 
 if __name__ == "__main__":
