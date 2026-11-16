@@ -30,11 +30,11 @@ def styles_to_attributes(root):
             element.attrib.update(saved)
 
 
-def clean_values(root):
+def clean_values(root, round_alpha=False):
     for element in svg_elements(root):
         for name, value in list(element.attrib.items()):
             if name in COLOR_PROPERTIES:
-                value = shortest_color(value)
+                value = shortest_color(value, round_alpha)
             elif name in LENGTH_ATTRIBUTES:
                 value = shortest_length(value)
             elif name == "class":
@@ -42,7 +42,7 @@ def clean_values(root):
             elif name == "style":
                 declarations = parse_style(value)
                 if declarations is not None:
-                    value = format_style([(key, shortest_color(item) if key in COLOR_PROPERTIES else item) for key, item in declarations])
+                    value = format_style([(key, shortest_color(item, round_alpha) if key in COLOR_PROPERTIES else item) for key, item in declarations])
             if value == "" and name not in CONDITIONAL and not name.startswith("{") and not (name in TRANSFORMS[1:] and any(href in element.attrib for href in HREFS)):
                 del element.attrib[name]
             else:

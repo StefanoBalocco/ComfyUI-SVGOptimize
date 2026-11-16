@@ -50,7 +50,13 @@ class FixtureTests(unittest.TestCase):
             moved.append(translate_path(parse_path(d), *offset))
         out_tags = re.findall(r'<path\b[^>]*>', result)
         self.assertTrue(all("transform" not in tag for tag in out_tags))
-        self.assertEqual(moved, [parse_path(re.search(r'\bd="([^"]*)"', tag).group(1)) for tag in out_tags])
+        written = [parse_path(re.search(r'\bd="([^"]*)"', tag).group(1)) for tag in out_tags]
+        self.assertEqual(len(moved), len(written))
+        for before, after in zip(moved, written):
+            self.assertEqual(len(before), len(after))
+            for old, new in zip(before, after):
+                # a cubic whose control points lie on its chord is written as a line
+                self.assertTrue(old == new or (old[0] == "C" and new == ("L", old[1][-2:])), old)
         fills = [re.search(r'\bfill="([^"]*)"', tag).group(1) for tag in paths]
         out_fills = [re.search(r'\bfill="([^"]*)"', tag).group(1) for tag in out_tags]
         self.assertEqual([shortest_color(fill) for fill in fills], [shortest_color(fill) for fill in out_fills])

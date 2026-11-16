@@ -1,12 +1,12 @@
-"""Basic shapes written as paths or circles, plain translates baked into coordinates, and removal of the stroke properties of zero-width strokes."""
+"""Basic shapes written as paths or circles, plain translates baked into coordinates, and removal of the stroke properties that draw nothing."""
 from decimal import Decimal, Inexact
 
-from .svg_attributes import number_list
+from .svg_attributes import number_list, set_names
 from .svg_document import SVG_NS, declared_in, element_cost, local_name, style_sets, svg_elements, use_targets
 from .svg_numbers import EXACT, format_number, parse_number
 from .svg_path import format_path, parse_path, translate_path
 from .svg_transform import as_translate, parse_transform
-from .svg_values import format_style, is_zero_length, parse_style
+from .svg_values import format_style, is_zero_length, parse_color, parse_style, set_property, shortest_color
 
 MARKERS = ("marker-start", "marker-mid", "marker-end", "marker")
 COORDINATES = {"line": ("x1", "y1", "x2", "y2"), "polyline": ("points",), "polygon": ("points",),
@@ -14,9 +14,10 @@ COORDINATES = {"line": ("x1", "y1", "x2", "y2"), "polyline": ("points",), "polyg
 WRITTEN = {"path": ("d",), "polyline": ("points",), "polygon": ("points",), "line": COORDINATES["line"],
            "rect": COORDINATES["rect"], "circle": ("cx", "cy", "r"), "ellipse": ("cx", "cy", "rx", "ry")}
 STROKE_SHAPES = ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon")
-STROKE_PROPERTIES = ("stroke", "stroke-opacity", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit",
+STROKE_PROPERTIES = ("stroke-opacity", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit",
                      "stroke-dasharray", "stroke-dashoffset")
 STYLE_OVERRIDES = ("d", "r", "transform")
+OPACITIES = (("fill", "fill-opacity"), ("stroke", "stroke-opacity"))
 TRANSLATED = {"rect": (("x", 0), ("y", 1)), "circle": (("cx", 0), ("cy", 1)), "ellipse": (("cx", 0), ("cy", 1)),
               "line": (("x1", 0), ("y1", 1), ("x2", 0), ("y2", 1))}
 
@@ -31,28 +32,68 @@ def has_markers(root):
                for element in root.iter() for name, value in element.attrib.items())
 
 
-def remove_zero_width_strokes(root):
-    if has_markers(root):
-        return
+def drop_properties(element, declarations, names):
+    """Removes the properties from the attributes and from the parsed style of the element."""
+    for name in names:
+        element.attrib.pop(name, None)
+    declarations = [(name, value) for name, value in declarations if name not in names]
+    if declarations:
+        element.set("style", format_style(declarations))
+    else:
+        element.attrib.pop("style", None)
+
+
+def remove_unused_strokes(root):
+    markers = has_markers(root)
     targets = use_targets(root)
     for element in svg_elements(root):
         if local_name(element) not in STROKE_SHAPES:
             continue
         declarations = parse_style(element.get("style", ""))
         width = declared_in(element, "stroke-width", declarations)
-        if width is None or not is_zero_length(width):
+        if width is None:
             continue
         ancestors = list(element.iterancestors())
         can_stroke = any("stroke" in item.attrib or style_sets(item, ("stroke",)) for item in ancestors) or any(
             item.get("id") in targets for item in [element, *ancestors])
-        names = STROKE_PROPERTIES if can_stroke else STROKE_PROPERTIES + ("stroke-width",)
-        for name in names:
-            element.attrib.pop(name, None)
-        declarations = [(name, value) for name, value in declarations if name not in names]
-        if declarations:
-            element.set("style", format_style(declarations))
+        paint = declared_in(element, "stroke", declarations)
+        if paint == "none" or (paint == "" and not can_stroke):
+            names = STROKE_PROPERTIES if markers else STROKE_PROPERTIES + ("stroke-width",)
+        elif is_zero_length(width) and not markers:
+            names = ("stroke",) + STROKE_PROPERTIES + (() if can_stroke else ("stroke-width",))
         else:
-            element.attrib.pop("style", None)
+            continue
+        drop_properties(element, declarations, names)
+
+
+def merge_opacities(root, round_alpha=False):
+    """Writes the fill-opacity and stroke-opacity of a shape into the alpha of its fill and stroke color, as hex, when the alpha is exact (or rounded to 1/255 with `round_alpha`) and the text is shorter."""
+    used = use_targets(root)
+    cache = {}
+    for element in svg_elements(root):
+        declarations = parse_style(element.get("style", ""))
+        ancestors = list(element.iterancestors())
+        if local_name(element) not in STROKE_SHAPES or declarations is None or any(node.get("id") in used for node in [element, *ancestors]):
+            continue
+        above = set_names(ancestors[0], cache) if ancestors else ()
+        for paint, opacity in OPACITIES:
+            color = parse_color(declared_in(element, paint, declarations).strip())
+            alpha = parse_number(declared_in(element, opacity, declarations).strip())
+            if opacity in above or color is None or alpha is None or not 0 <= alpha <= 1:
+                continue
+            try:
+                merged = EXACT.multiply(color[3], alpha)
+            except Inexact:
+                continue
+            if merged != merged.to_integral_value() and not round_alpha:
+                continue
+            saved, cost = list(element.attrib.items()), element_cost(element)
+            drop_properties(element, parse_style(element.get("style", "")), (opacity,))
+            set_property(element, paint, shortest_color("#%02x%02x%02x%02x" % (*color[:3], int(merged.to_integral_value()))))
+            if element_cost(element) >= cost:
+                element.attrib.clear()
+                element.attrib.update(saved)
+            declarations = parse_style(element.get("style", ""))
 
 
 def points_segments(element, close):

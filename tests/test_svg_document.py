@@ -100,7 +100,7 @@ def roundtrip(text):
 
 class SerializeTests(unittest.TestCase):
     def test_text_and_quotes(self):
-        doc = f'<svg {S}><style>a > b {{ fill: red }}</style><text font-family=\'"A B"\'> x &amp; &lt; é </text></svg>'
+        doc = f'<svg {S}><style>a > b:hover {{ fill: red }}</style><text font-family=\'"A B"\'> x &amp; &lt; é </text></svg>'
         self.assertEqual(roundtrip(doc), doc)
         self.assertEqual(opt(doc), doc)
 

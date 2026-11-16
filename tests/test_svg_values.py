@@ -15,11 +15,29 @@ class ColorTests(unittest.TestCase):
             self.assertEqual(shortest_color(text), expected, text)
 
     def test_untouched(self):
-        for text in ("rgb(50%,0%,0%)", "rgb(50%,0,0)", "rgb(256,0,0)", "rgb(10%,0,0%)", "currentColor", "rgba(0,0,0,.5)",
-                     "url(#a)", "#abcd", "none", "inherit", "rgb(1.0,0,0)", "rgb(101%,0%,0%)", " rgb(1,2) "):
+        for text in ("rgb(50%,0%,0%)", "rgb(50%,0,0)", "rgb(256,0,0)", "rgb(10%,0,0%)", "currentColor",
+                     "url(#a)", "#abcd", "none", "inherit", "rgb(1.0,0,0)", "rgb(101%,0%,0%)", "rgb(1 2 3/2)", "rgb(1 2 3 4)", "rgb(1,2 3)", "rgb(1 2 3/)", "rgba(0,0,0,.5", " rgb(1,2) "):
             self.assertEqual(shortest_color(text), text, text)
         self.assertEqual(shortest_color("rgb(\u0663,0,0)"), "rgb(\u0663,0,0)")
         self.assertEqual(shortest_color("rgb(\u00a0255,0,0)"), "rgb(\u00a0255,0,0)")
+
+    def test_alpha_forms(self):
+        cases = {"rgba(255,0,0,.2)": "#f003", "rgb(255 0 0 / 20%)": "#f003", "rgb(0 0 0/.4)": "#0006", "#FF000080": "#ff000080",
+                 "#F008": "#f008", "#ff0000ff": "red", "#ff0000": "red", "transparent": "#0000", "rgba(10,20,30,0)": "#0a141e00",
+                 "rgba(1,2,3,1)": "#010203", "rgb(100% 0% 0%/10%)": "rgb(255 0 0/.1)"}
+        for text, expected in cases.items():
+            self.assertEqual(shortest_color(text), expected, text)
+
+    def test_alpha_stays_exact(self):
+        cases = {"rgba(255,0,0,.5)": "rgb(255 0 0/.5)", "rgb(255 0 0/50%)": "rgb(255 0 0/.5)", "rgba(204,204,204,.5)": "hsl(0 0% 80%/.5)",
+                 "rgb(255 0 0/.3)": "rgb(255 0 0/.3)", "rgb(255,0,0,0.125)": "rgb(255 0 0/.125)"}
+        for text, expected in cases.items():
+            self.assertEqual(shortest_color(text), expected, text)
+
+    def test_alpha_rounds_to_a_255th(self):
+        cases = {"rgba(255,0,0,.5)": "#ff000080", "rgb(255 0 0/.3)": "#ff00004c", "rgb(255 0 0/50%)": "#ff000080", "rgb(0 0 0/.9999)": "#000"}
+        for text, expected in cases.items():
+            self.assertEqual(shortest_color(text, True), expected, text)
 
     def test_inexact_percentage_stays(self):
         for value in ("rgb(1e-9999999%,0%,0%)", f"rgb({'1' * 1100}%,0%,0%)"):

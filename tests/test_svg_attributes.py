@@ -92,7 +92,7 @@ class AttributeTests(unittest.TestCase):
     def test_order_in_optimize(self):
         self.assertEqual(opt(f'<svg {S}><path d="M0 0h1" style="fill:#FF0000;stroke:none"/></svg>'),
                          f'<svg {S}><path d="M0 0h1" fill="red"/></svg>')
-        styled = f'<svg {S}><style>g{{fill:red}}</style><g><path d="M0 0h1" style="fill:#000"/></g></svg>'
+        styled = f'<svg {S}><style>g{{fill:red}}@media print{{}}</style><g><path d="M0 0h1" style="fill:#000"/></g></svg>'
         self.assertIn('style="fill:#000"', opt(styled))
 
     def test_animation_in_optimize(self):
@@ -130,7 +130,7 @@ class AttributeTests(unittest.TestCase):
         self.assertIn('fill="#f39c12"', out)
         self.assertIn("<path", out)
         self.assertEqual(opt(out), out)
-        self.assertEqual(out, f'<svg {S}><path fill="#f39c12" fill-rule="evenodd" stroke-linecap="square" stroke-width="1pt" d="M27.042373 10.5h7.5v31h-7.5z"/></svg>')
+        self.assertEqual(out, f'<svg {S}><path fill="#f39c12" fill-rule="evenodd" d="M27.042373 10.5h7.5v31h-7.5z"/></svg>')
 
     def test_style_defaults_and_attributes_settle(self):
         out = opt(f'<svg {S}><path d="M0 0h1" style="fill:#f39c12;stroke:none;fill-rule:evenodd;stroke-linecap:square;stroke-width:1pt;stroke-opacity:1;fill-opacity:1"/></svg>')

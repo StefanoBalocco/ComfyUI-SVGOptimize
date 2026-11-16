@@ -31,7 +31,7 @@ class IdTests(unittest.TestCase):
         self.assertIn('fill="url(#b)"', out)
 
     def test_skipped_with_style_script_animation(self):
-        for extra in ('<style>#k{fill:red}</style>', '<script/>', '<animate/>'):
+        for extra in ('<style>#k{fill:red}@media print{}</style>', '<script/>', '<animate/>'):
             self.assertIn('id="k"', opt(f'<svg {S}>{extra}<path id="k" d="M0 0h1"/></svg>'), extra)
 
     def test_fonts_kept(self):
@@ -91,7 +91,7 @@ class GroupTests(unittest.TestCase):
             self.assertEqual(run(collapse_groups, doc), doc)
 
     def test_kept_with_stylesheet(self):
-        self.assertIn("<g", opt(f'<svg {S}><style>path{{fill:red}}</style><g fill="red"><path d="M0 0h1"/></g></svg>'))
+        self.assertIn("<g", opt(f'<svg {S}><style>path{{fill:red}}@media print{{}}</style><g fill="red"><path d="M0 0h1"/></g></svg>'))
 
     def test_child_setting_the_property_keeps_group(self):
         for doc in (f'<svg {S}><g fill="red"><path style="fill:inherit;stroke:#000;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" d="M0 0h10v10H0z"/></g></svg>',
@@ -218,7 +218,7 @@ class InvisibleTests(unittest.TestCase):
         self.assertEqual(opt(f'<svg {S}><defs><linearGradient id="g"><stop offset="0"/><stop offset="1" stop-color="red"/></linearGradient></defs>'
                              '<g id="layer2" style="display:none"><path fill="url(#g)" d="M0 0h9"/></g><path d="M0 0h2"/></svg>'),
                          f'<svg {S}><path d="M0 0h2"/></svg>')
-        for body in ('<style>path{display:inline}</style><path display="none" d="M0 0h1"/>',
+        for body in ('<style>path{display:inline}@media print{}</style><path display="none" d="M0 0h1"/>',
                      '<path display="none" d="M0 0h1"><set attributeName="display" to="inline"/></path>',
                      '<script>//</script><path display="none" d="M0 0h1"/>'):
             with self.subTest(body):
@@ -285,7 +285,6 @@ class OneStopGradientTests(unittest.TestCase):
             (f'<linearGradient id="g"{units} gradientTransform="scale(1 0)">{stop}</linearGradient>', "url(#g)"),
             ('<linearGradient id="g" href="#h"/><linearGradient id="h" href="#g"/>', "url(#g)"),
             ('<linearGradient id="g" href="#missing"/>', "url(#g)"),
-            (f'<linearGradient id="g"{units}><stop offset="0" stop-color="rgba(0,0,0,.5)"/></linearGradient>', "url(#g)"),
             (f'<linearGradient id="g"{units}>{stop}</linearGradient>', "url(other.svg#g)"),
             (f'<radialGradient id="g"{units}>{stop}</radialGradient>', "url(#g)"),
             (f'<linearGradient id="g" gradientUnits=" userSpaceOnUse">{stop}</linearGradient>', "url(#g)"),
@@ -300,12 +299,16 @@ class OneStopGradientTests(unittest.TestCase):
                 doc = f'<svg {S}>{gradient}<path fill="{fill}" d="M0 0h1"/></svg>'
                 self.assertEqual(run(paint_one_stop_gradients, doc), doc)
 
+    def test_stop_color_alpha(self):
+        doc = f'<svg {S}><linearGradient id="g" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="rgba(255,0,0,.2)"/></linearGradient><path fill="url(#g)" d="M0 0h1"/></svg>'
+        self.assertEqual(opt(doc), f'<svg {S}><path fill="#f003" d="M0 0h1"/></svg>')
+
     def test_optimized(self):
         doc = f'<svg {S} {X}>{self.CHAIN}<path style="fill:url(#ref);stroke:none" d="M0 0h1"/></svg>'
         self.assertEqual(opt(doc), f'<svg {S}><path d="M0 0h1" fill="#0f0"/></svg>')
 
     def test_kept_with_stylesheet(self):
-        doc = f'<svg {S} {X}><style>path{{}}</style>{self.CHAIN}<path fill="url(#ref)" d="M0 0h1"/></svg>'
+        doc = f'<svg {S} {X}><style>path{{}}@media print{{}}</style>{self.CHAIN}<path fill="url(#ref)" d="M0 0h1"/></svg>'
         self.assertIn('fill="url(#', opt(doc))
 
 

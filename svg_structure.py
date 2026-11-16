@@ -12,7 +12,7 @@ from .svg_document import HREFS, NAME, SVG_NS, TEXT_ELEMENTS, WHITESPACE, declar
 from .svg_numbers import EXACT, parse_number
 from .svg_shapes import has_markers
 from .svg_transform import parse_transform
-from .svg_values import INHERITED_PROPERTIES, color_bytes, format_style, is_zero_length, parse_style, shortest_color
+from .svg_values import INHERITED_PROPERTIES, parse_color, format_style, is_zero_length, parse_style, shortest_color
 
 DEFINITIONS = {"linearGradient", "radialGradient", "pattern", "clipPath", "mask", "marker", "symbol", "filter"}
 KEPT = {"title", "desc", "metadata", "font", "font-face", "color-profile"}
@@ -286,7 +286,7 @@ def gradient_color(gradient, defined):
     if color is None or opacity is None:
         return None
     color = color.strip() or "#000"
-    if color_bytes(color) is None or (opacity.strip() and parse_number(opacity.strip()) != 1):
+    if parse_color(color) is None or (opacity.strip() and parse_number(opacity.strip()) != 1):
         return None
     return shortest_color(color)
 
@@ -298,7 +298,7 @@ def painted(value, colors):
         return None
     fallback = value[match.end():]
     separated = not fallback or fallback[0].isspace()
-    if not separated or (fallback.strip().lower() not in ("", "none", "currentcolor") and color_bytes(fallback.strip()) is None):
+    if not separated or (fallback.strip().lower() not in ("", "none", "currentcolor") and parse_color(fallback.strip()) is None):
         return None
     return colors.get(next(group for group in match.groups() if group is not None))
 

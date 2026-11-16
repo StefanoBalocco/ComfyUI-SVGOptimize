@@ -1,5 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="120" height="80" viewBox="0 0 120 80"><style>
-    .sky { fill: rgb(135, 206, 235); }
-    .sun { fill: #FFD700; stroke: #FF8C00; stroke-width: 2px; }
-    g .tree { fill: #228b22; }
-  </style><defs><path id="tri" d="M0 20 10 0l10 20z" class="tree"/><linearGradient id="unused"><stop offset="0" stop-color="#fff"/></linearGradient></defs><rect class="sky" width="120" height="80"/><circle class="sun" cx="95" cy="20" r="10"/><g><use xlink:href="#tri" x="10" y="50"/><use xlink:href="#tri" x="40" y="50"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="120" height="80" viewBox="0 0 120 80"><defs><path id="a" d="M0 20 10 0l10 20z"/></defs><path fill="#87ceeb" d="M0 0h120v80H0z"/><circle cx="95" cy="20" r="10" fill="gold" stroke="#ff8c00" stroke-width="2"/><use xlink:href="#a" x="10" y="50"/><use xlink:href="#a" x="40" y="50"/></svg>

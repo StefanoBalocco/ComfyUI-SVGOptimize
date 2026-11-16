@@ -58,6 +58,19 @@ def reflected_control(previous, command, x, y):
     return x, y
 
 
+def is_straight(values, x, y):
+    """True when the control points of a C or Q segment lie on the chord from (x, y) to its end, in order, so that it traverses the chord once."""
+    chord = EXACT.subtract(values[-2], x), EXACT.subtract(values[-1], y)
+    along = [0]
+    for index in range(0, len(values) - 2, 2):
+        offset = EXACT.subtract(values[index], x), EXACT.subtract(values[index + 1], y)
+        if EXACT.subtract(EXACT.multiply(offset[0], chord[1]), EXACT.multiply(offset[1], chord[0])) != 0:
+            return False
+        along.append(EXACT.add(EXACT.multiply(offset[0], chord[0]), EXACT.multiply(offset[1], chord[1])))
+    along.append(EXACT.add(EXACT.multiply(chord[0], chord[0]), EXACT.multiply(chord[1], chord[1])))
+    return along[-1] != 0 and along == sorted(along)
+
+
 def parse_path(d):
     groups = tokenize(d)
     if groups is None:
@@ -97,6 +110,7 @@ def parse_path(d):
 
 
 def format_path(segments):
+    segments = list(segments)
     out = []
     letter = last = ""
     x = y = start_x = start_y = Decimal(0)
@@ -107,6 +121,8 @@ def format_path(segments):
                 letter, last = "z", ""
                 x, y = start_x, start_y
                 continue
+            if command in "CQ" and is_straight(values, x, y):
+                command, values = segments[index] = "L", values[-2:]
             candidates = [(command, values)]
             if index:
                 relative = shift(command, values, EXACT.minus(x), EXACT.minus(y))

@@ -1,6 +1,6 @@
 """Shortest text for colors and lengths, style attribute parsing, and presentation attribute tables."""
 import re
-from decimal import Inexact
+from decimal import Decimal, Inexact
 
 from .svg_numbers import EXACT, NUMBER, format_number, parse_number
 
@@ -82,10 +82,9 @@ GEOMETRY_DEFAULTS = {
     "line": {"x1": "0", "y1": "0", "x2": "0", "y2": "0"},
 }
 
-HEX_COLOR = re.compile(r"#(?:[0-9a-f]{3}|[0-9a-f]{6})", re.IGNORECASE)
-RGB_INTEGERS = re.compile(r"rgb\([ \t\n\r\f]*([0-9]+)[ \t\n\r\f]*,[ \t\n\r\f]*([0-9]+)[ \t\n\r\f]*,[ \t\n\r\f]*([0-9]+)[ \t\n\r\f]*\)", re.IGNORECASE)
-PERCENT = rf"({NUMBER.pattern})%"
-RGB_PERCENTS = re.compile(rf"rgb\([ \t\n\r\f]*{PERCENT}[ \t\n\r\f]*,[ \t\n\r\f]*{PERCENT}[ \t\n\r\f]*,[ \t\n\r\f]*{PERCENT}[ \t\n\r\f]*\)", re.IGNORECASE)
+HEX_COLOR = re.compile(r"#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})", re.IGNORECASE)
+COLOR_FUNCTION = re.compile(r"rgba?\(([^()]*)\)", re.IGNORECASE)
+CHANNEL_SEPARATOR = re.compile(r"[ \t\n\r\f]+")
 LENGTH = re.compile(rf"({NUMBER.pattern})(px|%|[a-zA-Z]+)?")
 ZERO_LENGTH = re.compile(r"[+-]?0*\.?0+(?:px|%|em|ex|in|cm|mm|pt|pc)?")
 CSS_SPACE = " \t\r\n\f"
@@ -98,44 +97,118 @@ for keyword, hex_color in sorted(COLOR_KEYWORDS.items()):
 
 def percent_to_byte(text):
     percent = parse_number(text)
-    if not 0 <= percent <= 100:
+    if percent is None or not 0 <= percent <= 100:
         return None
-    try:
-        byte = EXACT.divide(EXACT.multiply(percent, 255), 100)
-    except Inexact:
-        return None
+    byte = EXACT.divide(EXACT.multiply(percent, 255), 100)
     return int(byte) if byte == byte.to_integral_value() else None
 
 
-def color_bytes(text):
+def alpha_in_255ths(text):
+    """The alpha written as a number or percentage, times 255, or None when it is not within 0 to 1."""
+    percent = text.endswith("%")
+    alpha = parse_number(text[:-1] if percent else text)
+    if alpha is None:
+        return None
+    alpha = EXACT.multiply(alpha, Decimal("2.55") if percent else 255)
+    return alpha if 0 <= alpha <= 255 else None
+
+
+def function_color(body):
+    """The color of the arguments of rgb() or rgba(), written with commas or with spaces and a slash."""
+    body = body.strip(CSS_SPACE)
+    if "," in body:
+        channels = [item.strip(CSS_SPACE) for item in body.split(",")]
+        channels, alpha = channels[:3], channels[3:]
+    else:
+        channels, slash, alpha = body.partition("/")
+        channels = CHANNEL_SEPARATOR.split(channels.strip(CSS_SPACE))
+        alpha = [alpha.strip(CSS_SPACE)] if slash else []
+    if len(channels) != 3 or len(alpha) > 1:
+        return None
+    if all(re.fullmatch("[0-9]+", channel) for channel in channels):
+        values = tuple(int(channel) for channel in channels)
+        if max(values) > 255:
+            return None
+    elif all(channel.endswith("%") for channel in channels):
+        values = tuple(percent_to_byte(channel[:-1]) for channel in channels)
+        if None in values:
+            return None
+    else:
+        return None
+    alpha = alpha_in_255ths(alpha[0]) if alpha else Decimal(255)
+    return None if alpha is None else values + (alpha,)
+
+
+def parse_color(text):
+    """The red, green and blue bytes and the alpha times 255 of a color written as hex, keyword, `transparent` or rgb()/rgba(), or None."""
     if HEX_COLOR.fullmatch(text):
         digits = text[1:].lower()
-        if len(digits) == 3:
+        if len(digits) <= 4:
             digits = "".join(digit * 2 for digit in digits)
-        return tuple(int(digits[i:i + 2], 16) for i in (0, 2, 4))
+        values = tuple(int(digits[i:i + 2], 16) for i in range(0, len(digits), 2))
+        return values[:3] + (Decimal(values[3] if len(values) == 4 else 255),)
+    if text.lower() == "transparent":
+        return 0, 0, 0, Decimal(0)
     if text.lower() in COLOR_KEYWORDS:
-        return color_bytes(COLOR_KEYWORDS[text.lower()])
-    match = RGB_INTEGERS.fullmatch(text)
-    if match:
-        values = tuple(int(group) for group in match.groups())
-        return values if max(values) <= 255 else None
-    match = RGB_PERCENTS.fullmatch(text)
-    if match:
-        values = tuple(percent_to_byte(group) for group in match.groups())
-        return None if None in values else values
-    return None
+        return parse_color(COLOR_KEYWORDS[text.lower()])
+    match = COLOR_FUNCTION.fullmatch(text)
+    if match is None:
+        return None
+    try:
+        return function_color(match.group(1))
+    except Inexact:
+        return None
 
 
-def shortest_color(text):
-    rgb = color_bytes(text.strip())
-    if rgb is None:
+def hsl_text(rgb, opacity):
+    """The color as hsl() text, or None when its numbers are not exact decimals."""
+    red, green, blue = rgb
+    high, low = max(rgb), min(rgb)
+    delta = high - low
+    try:
+        lightness = EXACT.divide(10 * (high + low), 51)
+        if delta == 0:
+            hue = saturation = Decimal(0)
+        else:
+            saturation = EXACT.divide(100 * delta, 255 - abs(high + low - 255))
+            if high == red:
+                steps = green - blue
+            elif high == green:
+                steps = blue - red + 2 * delta
+            else:
+                steps = red - green + 4 * delta
+            hue = EXACT.divide(60 * (steps % (6 * delta)), delta)
+    except Inexact:
+        return None
+    return f"hsl({format_number(hue)} {format_number(saturation)}% {format_number(lightness)}%/{opacity})"
+
+
+def alpha_forms(rgb, alpha):
+    """The rgb() and hsl() texts of a color with alpha, those whose numbers are exact decimals."""
+    try:
+        opacity = format_number(EXACT.divide(alpha, 255))
+    except Inexact:
+        return []
+    return [form for form in ("rgb(%d %d %d/%s)" % (*rgb, opacity), hsl_text(rgb, opacity)) if form]
+
+
+def shortest_color(text, round_alpha=False):
+    """The shortest exact text of the color; with `round_alpha`, of the color with its alpha rounded to the nearest 1/255."""
+    color = parse_color(text.strip())
+    if color is None:
         return text
-    full = "#%02x%02x%02x" % rgb
-    candidates = [(len(full), 0, full)]
-    if full[1::2] == full[2::2]:
-        short = "#" + full[1::2]
-        candidates.append((len(short), 0, short))
-    candidates += [(len(name), 1, name) for name in KEYWORDS_BY_HEX.get(full, [])]
+    *rgb, alpha = color
+    if round_alpha:
+        alpha = alpha.to_integral_value()
+    candidates = [(len(text), 9, text)]
+    if alpha == alpha.to_integral_value():
+        digits = "%02x%02x%02x" % tuple(rgb) + ("" if alpha == 255 else "%02x" % int(alpha))
+        candidates.append((len(digits) + 1, 0, "#" + digits))
+        if digits[::2] == digits[1::2]:
+            candidates.append((len(digits) // 2 + 1, 0, "#" + digits[::2]))
+        candidates += [(len(name), 1, name) for name in KEYWORDS_BY_HEX.get("#" + digits, [])]
+    if alpha != 255:
+        candidates += [(len(form), rank, form) for rank, form in enumerate(alpha_forms(rgb, alpha), 2)]
     return min(candidates)[2]
 
 
@@ -188,6 +261,15 @@ def parse_style(text):
 
 def format_style(declarations):
     return ";".join(f"{name}:{value}" for name, value in declarations)
+
+
+def set_property(element, name, value):
+    """Sets a presentation property where the element declares it: in its style, else as an attribute."""
+    declarations = parse_style(element.get("style", "")) or []
+    if any(key == name for key, _ in declarations):
+        element.set("style", format_style([(key, value if key == name else old) for key, old in declarations]))
+    else:
+        element.set(name, value)
 
 
 def is_default(name, value, default):
