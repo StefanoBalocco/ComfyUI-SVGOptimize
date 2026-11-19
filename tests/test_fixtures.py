@@ -13,8 +13,7 @@ import unittest
 import package_alias  # noqa: F401
 from svgoptimize.svg_optimize import optimize_svg
 from svgoptimize.svg_path import parse_path, translate_path
-from svgoptimize.svg_transform import as_translate, parse_transform
-from svgoptimize.svg_values import shortest_color
+from svgoptimize.svg_values import as_translate, parse_transform, shortest_color
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NAMES = ["vtracer", "starvector", "inkscape", "styled"]
@@ -52,7 +51,8 @@ class FixtureTests(unittest.TestCase):
         self.assertTrue(all("transform" not in tag for tag in out_tags))
         written = [parse_path(re.search(r'\bd="([^"]*)"', tag).group(1)) for tag in out_tags]
         self.assertEqual(len(moved), len(written))
-        for before, after in zip(moved, written):
+        self.assertEqual(written[0], [("M", (0, 0)), ("L", (256, 0)), ("L", (256, 256)), ("L", (0, 256)), ("Z", ())])
+        for before, after in zip(moved[1:], written[1:]):
             self.assertEqual(len(before), len(after))
             for old, new in zip(before, after):
                 # a cubic whose control points lie on its chord is written as a line

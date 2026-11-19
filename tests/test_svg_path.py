@@ -8,7 +8,7 @@ import cairosvg
 
 import package_alias  # noqa: F401
 from helpers import S, opt
-from svgoptimize.svg_path import format_path, parse_path, rewrite_path, translate_path
+from svgoptimize.svg_path import format_path, parse_path, path_segments, rewrite_path, translate_path
 
 D = Decimal
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -151,9 +151,11 @@ class FormatTests(unittest.TestCase):
     def test_rewrite_path_remembers(self):
         written = {}
         self.assertEqual(rewrite_path("M 10 10 L 20 10", written), "M10 10h10")
-        self.assertEqual(written, {"M 10 10 L 20 10": "M10 10h10", "M10 10h10": "M10 10h10"})
+        segments = [("M", (10, 10)), ("L", (20, 10))]
+        self.assertEqual(written, {"M 10 10 L 20 10": ("M10 10h10", segments), "M10 10h10": ("M10 10h10", segments)})
         self.assertIsNone(rewrite_path("M0 0 X", written))
-        self.assertEqual(rewrite_path("X", {"X": "Y"}), "Y")
+        self.assertEqual(rewrite_path("X", {"X": ("Y", [])}), "Y")
+        self.assertEqual(path_segments("M10 10h10", written), segments)
 
     def test_writing_is_idempotent(self):
         for name in ("vtracer", "starvector", "inkscape", "styled"):

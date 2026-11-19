@@ -118,6 +118,17 @@ def declared_in(element, name, declarations):
     return values[-1] if values else element.get(name, "")
 
 
+def inherited(nodes, name, default):
+    """The first value of the property up the chain that is not empty or `inherit`, or None when a style cannot be parsed."""
+    for node in nodes:
+        value = declared(node, name)
+        if value is None:
+            return None
+        if value.strip() not in ("", "inherit"):
+            return value.strip()
+    return default
+
+
 def use_targets(root):
     """The ids that a `use` element refers to."""
     return {href[1:] for element in svg_elements(root) if local_name(element) == "use"

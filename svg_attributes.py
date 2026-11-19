@@ -1,13 +1,16 @@
-"""Attribute rewrites: style to presentation attributes, shortest values, compact geometry, default removal."""
-from decimal import Decimal
+"""Attribute rewrites: stylesheet and style to presentation attributes, shortest values, compact geometry, default removal."""
+import copy
 
-from .svg_document import HREFS, NAME, element_cost, local_name, style_sets, svg_elements, use_targets
-from .svg_numbers import NUMBER, SEPARATOR, SPACE, format_number, parse_number
+import cssselect2
+import tinycss2
+from lxml import etree
+
+from .svg_document import (HREFS, NAME, SVG_NS, document_facts, element_cost, has_foreign_object, local_name, namespace, remove_node,
+                           style_sets, svg_elements, use_targets)
 from .svg_path import rewrite_path
-from .svg_transform import format_transform, parse_transform
-from .svg_values import (COLOR_PROPERTIES, GEOMETRY_DEFAULTS, INHERITED_DEFAULTS, LENGTH_ATTRIBUTES, OTHER_DEFAULTS,
-                         PRESENTATION_ATTRIBUTES, format_style, is_default, parse_style, shortest_color,
-                         shortest_length)
+from .svg_values import (GEOMETRY_DEFAULTS, INHERITED_DEFAULTS, LENGTH_ATTRIBUTES, OTHER_DEFAULTS,
+                         PRESENTATION_ATTRIBUTES, convert_colors, format_number, format_style, format_transform, is_default, number_list,
+                         parse_number, parse_style, parse_transform, shortest_color, shortest_length)
 
 CONDITIONAL = {"requiredFeatures", "requiredExtensions", "systemLanguage"}
 TRANSFORMS = ("transform", "gradientTransform", "patternTransform")
@@ -33,36 +36,16 @@ def styles_to_attributes(root):
 def clean_values(root, round_alpha=False):
     for element in svg_elements(root):
         for name, value in list(element.attrib.items()):
-            if name in COLOR_PROPERTIES:
-                value = shortest_color(value, round_alpha)
-            elif name in LENGTH_ATTRIBUTES:
+            if name in LENGTH_ATTRIBUTES:
                 value = shortest_length(value)
             elif name == "class":
                 value = " ".join(NAME.findall(value))
-            elif name == "style":
-                declarations = parse_style(value)
-                if declarations is not None:
-                    value = format_style([(key, shortest_color(item, round_alpha) if key in COLOR_PROPERTIES else item) for key, item in declarations])
+            else:
+                value = convert_colors(name, value, lambda color: shortest_color(color, round_alpha))
             if value == "" and name not in CONDITIONAL and not name.startswith("{") and not (name in TRANSFORMS[1:] and any(href in element.attrib for href in HREFS)):
                 del element.attrib[name]
             else:
                 element.set(name, value)
-
-
-def number_list(text):
-    """The numbers of a whitespace or comma separated list, or None."""
-    values = []
-    position = SPACE.match(text).end()
-    while position < len(text):
-        match = NUMBER.match(text, position)
-        if match is None:
-            return None
-        values.append(Decimal(match.group()))
-        separator = SEPARATOR.match(text, match.end())
-        if "," in separator.group() and separator.end() == len(text):
-            return None
-        position = separator.end()
-    return values or None
 
 
 def format_geometry(root, written):
@@ -126,3 +109,54 @@ def remove_defaults(root, stylesheet):
                     element.set("style", format_style(kept))
                 else:
                     del element.attrib["style"]
+
+
+def read_rules(styles):
+    """The (selector, declarations) pairs of the style elements in source order, or None when a stylesheet holds more than plain rules."""
+    rules = []
+    for style in styles:
+        if style.get("type", "text/css") != "text/css" or "media" in style.attrib:
+            return None
+        for rule in tinycss2.parse_stylesheet(style.text or "", skip_comments=True, skip_whitespace=True):
+            if rule.type != "qualified-rule" or any(token.type == "literal" and token.value == ":" for token in rule.prelude):
+                return None
+            declarations = tinycss2.parse_declaration_list(rule.content, skip_comments=True, skip_whitespace=True)
+            if any(item.type != "declaration" or item.important or not item.value or "var(" in tinycss2.serialize(item.value).lower() for item in declarations):
+                return None
+            try:
+                selectors = cssselect2.compile_selector_list(rule.prelude)
+            except cssselect2.SelectorError:
+                return None
+            rules.extend((selector, declarations) for selector in selectors)
+    return rules
+
+
+def inline_stylesheet(root, preceding):
+    """A copy of the tree without its `<style>` elements and `class` attributes, whose rules are declared in the `style` of each element they match,
+    or None when the document is not one whose stylesheet is plain rules in `<style>` elements with no script or animation."""
+    facts = document_facts(root, preceding)
+    styles = [element for element in root.iter(etree.Element) if local_name(element) == "style"]
+    if not styles or preceding or facts.script or facts.animation or has_foreign_object(root) or not all(namespace(style) == SVG_NS for style in styles):
+        return None
+    rules = read_rules(styles)
+    if rules is None:
+        return None
+    matcher = cssselect2.Matcher()
+    for selector, declarations in rules:
+        matcher.add_selector(selector, declarations)
+    root = copy.deepcopy(root)
+    for wrapper in cssselect2.ElementWrapper.from_xml_root(root).iter_subtree():
+        element = wrapper.etree_element
+        # A later rule of equal specificity, and a higher one, wins.
+        values = {item.lower_name: tinycss2.serialize(item.value).strip() for _, _, _, declarations in matcher.match(wrapper) for item in declarations}
+        own = element.get("style", "")
+        declared = parse_style(own) or []
+        names = {name for name, _ in declared}
+        rules_style = format_style([(name, value) for name, value in values.items() if name not in names])
+        if rules_style:
+            element.set("style", f"{rules_style};{own}" if own else rules_style)
+    for element in list(root.iter(etree.Element)):
+        element.attrib.pop("class", None)
+        if local_name(element) == "style":
+            remove_node(element)
+    return root

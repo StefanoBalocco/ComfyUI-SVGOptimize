@@ -9,10 +9,8 @@ from string import ascii_letters
 from lxml import etree
 
 from .svg_document import HREFS, NAME, SVG_NS, TEXT_ELEMENTS, WHITESPACE, declared, defined_ids, elements, has_foreign_object, is_switch_child, local_name, namespace, remove_node, style_sets, svg_elements, use_targets
-from .svg_numbers import EXACT, parse_number
 from .svg_shapes import has_markers
-from .svg_transform import parse_transform
-from .svg_values import INHERITED_PROPERTIES, parse_color, format_style, is_zero_length, parse_style, shortest_color
+from .svg_values import EXACT, INHERITED_PROPERTIES, format_style, is_zero_length, parse_color, parse_number, parse_style, parse_transform, shortest_color
 
 DEFINITIONS = {"linearGradient", "radialGradient", "pattern", "clipPath", "mask", "marker", "symbol", "filter"}
 KEPT = {"title", "desc", "metadata", "font", "font-face", "color-profile"}

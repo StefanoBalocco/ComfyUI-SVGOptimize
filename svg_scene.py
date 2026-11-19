@@ -18,6 +18,9 @@ from cairosvg.parser import Tree
 from cairosvg.surface import PNGSurface
 from cairosvg.url import parse_url
 
+from .svg_document import elements, parse_svg, serialize
+from .svg_values import convert_colors, read_color
+
 # Attribute that numbers the elements of a document, so that what CairoSVG
 # draws can be traced back to them.
 KEY = "data-k"
@@ -130,13 +133,17 @@ class _Recorder:
         return Shape(subpaths, closed, lines, None, "nonzero", None, 0.0, list(self.clips), element=surface.index, matrix=tuple(self.context.get_matrix()),
                      editable=not (surface.uses or surface.marks), fittable=not surface.effects)
 
-    def _record_fill(self):
+    def _recorded_path(self):
         if not self.recording or self.text_depth or not self._opaque_source():
+            return None
+        path = _device_path(self.context)
+        return path if path[0] else None
+
+    def _record_fill(self):
+        path = self._recorded_path()
+        if path is None:
             return
-        subpaths, closed, lines = _device_path(self.context)
-        if not subpaths:
-            return
-        shape = self._shape(subpaths, closed, lines)
+        shape = self._shape(*path)
         shape.fill = self._paint()
         shape.fill_rule = "evenodd" if self.context.get_fill_rule() == cairocffi.FILL_RULE_EVEN_ODD else "nonzero"
         shape.fittable &= shape.fill is not None
@@ -153,11 +160,10 @@ class _Recorder:
         self.context.fill_preserve()
 
     def _record_stroke(self):
-        if not self.recording or self.text_depth or not self._opaque_source():
+        path = self._recorded_path()
+        if path is None:
             return
-        subpaths, closed, lines = _device_path(self.context)
-        if not subpaths:
-            return
+        subpaths, closed, lines = path
         xx, yx, xy, yy, _, _ = self.context.get_matrix()
         shape = self.pending
         if shape is None or shape.closed != closed or len(shape.subpaths) != len(subpaths) or not all(map(np.array_equal, shape.subpaths, subpaths)):
@@ -320,10 +326,31 @@ class _CaptureSurface(_Surface):
         self.index = index
 
 
+def rgba_text(rgb, alpha) -> str:
+    return "#%02x%02x%02x" % tuple(rgb) if alpha == 255 else "rgba(%d,%d,%d,%s)" % (*rgb, number(float(alpha) / 255, 4))
+
+
+def cairo_color(text: str) -> str:
+    """The color as `#rrggbb` or `rgba()` with a decimal alpha, the forms CairoSVG reads exactly; text that is not a readable color stays."""
+    color = read_color(text.strip())
+    if color is None:
+        return text
+    return rgba_text(color[:3], color[3])
+
+
+def cairo_colors(data: bytes) -> bytes:
+    """The document with the colors of its attributes and style declarations written as `cairo_color` does."""
+    root, preceding = parse_svg(data)
+    for element in elements(root):
+        for name, value in list(element.attrib.items()):
+            element.set(name, convert_colors(name, value, cairo_color))
+    return serialize(root, preceding)
+
+
 def capture_svg(data: bytes, width: int, height: int) -> Scene:
     """The shapes CairoSVG draws for the document `data`, whose elements are numbered by KEY."""
     scene = Scene(width, height, [])
-    _CaptureSurface(Tree(bytestring=data, unsafe=False), None, 96, None, None, None, 1, width, height, scene=scene)
+    _CaptureSurface(Tree(bytestring=cairo_colors(data), unsafe=False), None, 96, None, None, None, 1, width, height, scene=scene)
     # An element that is also drawn through <use> or markers changes with them.
     shared = {shape.element for shape in scene.shapes if not shape.editable}
     for shape in scene.shapes:
@@ -335,7 +362,7 @@ def capture_svg(data: bytes, width: int, height: int) -> Scene:
 def render_layer(data: bytes, width: int, height: int, skipped: set[int] = frozenset(), background: str | None = None):
     """Premultiplied RGB [3,H,W] and alpha [H,W] in 0..1 of the document `data`
     on a transparent or `background` colored surface, without the elements numbered in `skipped`."""
-    surface = _Surface(Tree(bytestring=data, unsafe=False), None, 96, None, None, None, 1, width, height, background, skipped=skipped)
+    surface = _Surface(Tree(bytestring=cairo_colors(data), unsafe=False), None, 96, None, None, None, 1, width, height, background, skipped=skipped)
     surface.cairo.flush()
     pixels = np.frombuffer(surface.cairo.get_data(), np.uint8).reshape(height, width, 4).astype(np.float32) / 255
     return np.ascontiguousarray(pixels[:, :, 2::-1].transpose(2, 0, 1)), pixels[:, :, 3]
@@ -392,7 +419,3 @@ def path_data(subpaths, closed, lines, decimals) -> str:
             parts.append("z")
             previous, token, current = "z", "z", start
     return "".join(parts)
-
-
-def hex_color(rgba) -> str:
-    return "#" + "".join(f"{round(c * 255):02x}" for c in rgba[:3])

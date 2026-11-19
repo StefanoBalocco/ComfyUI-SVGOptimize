@@ -38,7 +38,11 @@ class OptimizeSVG(io.ComfyNode):
                 optimized = optimize_svg(data, keep_metadata, simplify)
                 progress.update(1)
                 if simplify:
-                    simplified = simplify_svg(data, comfy.model_management.get_torch_device(), lambda: progress.update(1))
+                    try:
+                        simplified = simplify_svg(optimized, comfy.model_management.get_torch_device(), lambda: progress.update(1))
+                    except ValueError as exc:
+                        logging.warning("Optimize SVG: simplify skipped for document %d: %s", index, exc)
+                        simplified = None
                     if simplified is not None:
                         optimized = min(optimized, optimize_svg(simplified, keep_metadata, simplify), key=len)
                 data = optimized

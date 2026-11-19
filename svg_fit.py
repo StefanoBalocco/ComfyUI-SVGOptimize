@@ -45,33 +45,79 @@ NEWTON_STEPS = 3
 
 if triton is not None:
     @triton.jit
-    def _coverage_forward(edges, cuts, squares, widths, offsets, boxes, modes, cover, dist, index, E, H, W, tiles_x, FAR: tl.constexpr, TILE: tl.constexpr):
+    def _layer_tiles(boxes, layer, TILE: tl.constexpr):
+        """The pixel box [x0,x1) x [y0,y1) of the layer, the tiles it spans across and their number."""
+        x0 = tl.load(boxes + layer * 4)
+        y0 = tl.load(boxes + layer * 4 + 1)
+        x1 = tl.load(boxes + layer * 4 + 2)
+        y1 = tl.load(boxes + layer * 4 + 3)
+        tiles_x = (x1 - x0 + TILE - 1) // TILE
+        return x0, y0, x1, y1, tiles_x, tiles_x * ((y1 - y0 + TILE - 1) // TILE)
+
+    @triton.jit
+    def _tile_pixels(tile, tiles_x, x0, y0, x1, y1, TILE: tl.constexpr):
+        """Origin of the tile, the coordinates of its pixels and which of them lie in the box."""
+        i = tl.arange(0, TILE * TILE)
+        tx = x0 + (tile % tiles_x) * TILE
+        ty = y0 + (tile // tiles_x) * TILE
+        x = tx + i % TILE
+        y = ty + i // TILE
+        return tx, ty, x, y, (x < x1) & (y < y1)
+
+    @triton.jit
+    def _edge_along(rx, ry, dx, dy):
+        return (rx * dx + ry * dy) / tl.maximum(dx * dx + dy * dy, 1e-12)
+
+    @triton.jit
+    def _cut_band(along, t, first, last, e, rx, ry, dx, dy, half):
+        """The position on the edge, the distance and the band of a stroke edge,
+        where the end edges of a cut line continue straight up to the cuts."""
+        t = tl.where(first == e, tl.minimum(along, 1.0), t)
+        t = tl.where(last == e, tl.maximum(along, t), t)
+        d = tl.sqrt((rx - t * dx) * (rx - t * dx) + (ry - t * dy) * (ry - t * dy))
+        return t, d, tl.maximum(tl.minimum(d + half, 0.5) - tl.maximum(d - half, -0.5), 0.0)
+
+    @triton.jit
+    def _reach_start(edges, first, px, py, extend, valid):
+        """How far past the start of edge `first` the pixel lies."""
+        fx = tl.load(edges + first * 4, mask=valid, other=0.0)
+        fy = tl.load(edges + first * 4 + 1, mask=valid, other=0.0)
+        fdx = tl.load(edges + first * 4 + 2, mask=valid, other=1.0) - fx
+        fdy = tl.load(edges + first * 4 + 3, mask=valid, other=0.0) - fy
+        return ((px - fx) * fdx + (py - fy) * fdy) / tl.maximum(tl.sqrt(fdx * fdx + fdy * fdy), 1e-6) + extend
+
+    @triton.jit
+    def _reach_end(edges, last, px, py, extend, valid):
+        """How far before the end of edge `last` the pixel lies."""
+        lx = tl.load(edges + last * 4 + 2, mask=valid, other=1.0)
+        ly = tl.load(edges + last * 4 + 3, mask=valid, other=0.0)
+        ldx = lx - tl.load(edges + last * 4, mask=valid, other=0.0)
+        ldy = ly - tl.load(edges + last * 4 + 1, mask=valid, other=0.0)
+        return ((lx - px) * ldx + (ly - py) * ldy) / tl.maximum(tl.sqrt(ldx * ldx + ldy * ldy), 1e-6) + extend
+
+    @triton.jit
+    def _coverage_forward(edges, cuts, squares, widths, offsets, boxes, starts, modes, cover, dist, index, E, TILE: tl.constexpr):
         """Box-filtered coverage of each pixel by one layer and the edge its
         gradient goes to. A fill (nonzero or even-odd winding) also keeps its
         signed distance to the outline (positive inside). A stroke is the union
         of the bands around its edges; near a butt or square open end, they are
         cut where the first (cuts[0]) or last (cuts[1]) edge of the line starts
-        or ends, or half a width beyond for square caps."""
+        or ends, or half a width beyond for square caps. The pixels of the layer's
+        box are stored row by row from its start in the packed arrays."""
         tile = tl.program_id(0)
         layer = tl.program_id(1)
-        i = tl.arange(0, TILE * TILE)
-        tx = (tile % tiles_x) * TILE
-        ty = (tile // tiles_x) * TILE
-        x = tx + i % TILE
-        y = ty + i // TILE
-        valid = (x < W) & (y < H)
-        out = layer * H * W + y * W + x
-        px = x.to(tl.float32) + 0.5
-        py = y.to(tl.float32) + 0.5
-        mode = tl.load(modes + layer)
-        half = tl.load(widths + layer) * 0.5
-        best = tl.full((TILE * TILE,), 3.0e38, tl.float32)
-        closest = tl.full((TILE * TILE,), -1, tl.int32)
-        winding = tl.zeros((TILE * TILE,), tl.int32)
-        covered = tl.zeros((TILE * TILE,), tl.float32)
-        signed = tl.zeros((TILE * TILE,), tl.float32) + tl.where(mode == 2, FAR, -FAR)
-        if ((tx + TILE >= tl.load(boxes + layer * 4)) & (tx <= tl.load(boxes + layer * 4 + 2))
-                & (ty + TILE >= tl.load(boxes + layer * 4 + 1)) & (ty <= tl.load(boxes + layer * 4 + 3))):
+        x0, y0, x1, y1, tiles_x, tiles = _layer_tiles(boxes, layer, TILE)
+        if tile < tiles:
+            tx, ty, x, y, valid = _tile_pixels(tile, tiles_x, x0, y0, x1, y1, TILE)
+            out = tl.load(starts + layer) + (y - y0) * (x1 - x0) + x - x0
+            px = x.to(tl.float32) + 0.5
+            py = y.to(tl.float32) + 0.5
+            mode = tl.load(modes + layer)
+            half = tl.load(widths + layer) * 0.5
+            best = tl.full((TILE * TILE,), 3.0e38, tl.float32)
+            closest = tl.full((TILE * TILE,), -1, tl.int32)
+            winding = tl.zeros((TILE * TILE,), tl.int32)
+            covered = tl.zeros((TILE * TILE,), tl.float32)
             if mode == 2:
                 extend = tl.where(tl.load(squares + layer) != 0, half, 0.0)
                 for e in range(tl.load(offsets + layer), tl.load(offsets + layer + 1)):
@@ -81,28 +127,16 @@ if triton is not None:
                     dy = tl.load(edges + e * 4 + 3) - ay
                     rx = px - ax
                     ry = py - ay
-                    along = (rx * dx + ry * dy) / tl.maximum(dx * dx + dy * dy, 1e-12)
+                    along = _edge_along(rx, ry, dx, dy)
                     t = tl.minimum(tl.maximum(along, 0.0), 1.0)
                     d2 = (rx - t * dx) * (rx - t * dx) + (ry - t * dy) * (ry - t * dy)
-                    # The end edges of a cut line continue straight up to the cuts.
                     first = tl.load(cuts + e)
                     last = tl.load(cuts + E + e)
-                    t = tl.where(first == e, tl.minimum(along, 1.0), t)
-                    t = tl.where(last == e, tl.maximum(along, t), t)
-                    d = tl.sqrt((rx - t * dx) * (rx - t * dx) + (ry - t * dy) * (ry - t * dy))
-                    band = tl.maximum(tl.minimum(d + half, 0.5) - tl.maximum(d - half, -0.5), 0.0)
-                    fx = tl.load(edges + tl.maximum(first, 0) * 4)
-                    fy = tl.load(edges + tl.maximum(first, 0) * 4 + 1)
-                    fdx = tl.load(edges + tl.maximum(first, 0) * 4 + 2) - fx
-                    fdy = tl.load(edges + tl.maximum(first, 0) * 4 + 3) - fy
-                    reach = ((px - fx) * fdx + (py - fy) * fdy) / tl.maximum(tl.sqrt(fdx * fdx + fdy * fdy), 1e-6) + extend
-                    band *= tl.where(first >= 0, tl.minimum(tl.maximum(reach + 0.5, 0.0), 1.0), 1.0)
-                    lx = tl.load(edges + tl.maximum(last, 0) * 4 + 2)
-                    ly = tl.load(edges + tl.maximum(last, 0) * 4 + 3)
-                    ldx = lx - tl.load(edges + tl.maximum(last, 0) * 4)
-                    ldy = ly - tl.load(edges + tl.maximum(last, 0) * 4 + 1)
-                    reach = ((lx - px) * ldx + (ly - py) * ldy) / tl.maximum(tl.sqrt(ldx * ldx + ldy * ldy), 1e-6) + extend
-                    band *= tl.where(last >= 0, tl.minimum(tl.maximum(reach + 0.5, 0.0), 1.0), 1.0)
+                    _, _, band = _cut_band(along, t, first, last, e, rx, ry, dx, dy, half)
+                    cut_first = first >= 0
+                    cut_last = last >= 0
+                    band *= tl.where(cut_first, tl.minimum(tl.maximum(_reach_start(edges, first, px, py, extend, cut_first) + 0.5, 0.0), 1.0), 1.0)
+                    band *= tl.where(cut_last, tl.minimum(tl.maximum(_reach_end(edges, last, px, py, extend, cut_last) + 0.5, 0.0), 1.0), 1.0)
                     better = (band > covered) | ((band == covered) & (d2 < best))
                     covered = tl.where(better, band, covered)
                     best = tl.where(better, d2, best)
@@ -117,7 +151,7 @@ if triton is not None:
                     dy = by - ay
                     rx = px - ax
                     ry = py - ay
-                    t = tl.minimum(tl.maximum((rx * dx + ry * dy) / tl.maximum(dx * dx + dy * dy, 1e-12), 0.0), 1.0)
+                    t = tl.minimum(tl.maximum(_edge_along(rx, ry, dx, dy), 0.0), 1.0)
                     qx = rx - t * dx
                     qy = ry - t * dy
                     d2 = qx * qx + qy * qy
@@ -131,9 +165,56 @@ if triton is not None:
                 d = tl.sqrt(best)
                 signed = tl.where(inside, d, -d)
                 covered = tl.minimum(tl.maximum(signed + 0.5, 0.0), 1.0)
-        tl.store(cover + out, covered, mask=valid)
-        tl.store(dist + out, signed, mask=valid)
-        tl.store(index + out, closest, mask=valid)
+            tl.store(cover + out, covered, mask=valid)
+            tl.store(dist + out, signed, mask=valid)
+            tl.store(index + out, closest, mask=valid)
+
+    @triton.jit
+    def _kite_cover(cover, boxes, starts, kite, x, y, valid):
+        """Coverage of a miter-join layer at the pixels (x, y) of its owner's box, zero outside the kite layer's own box."""
+        kx0 = tl.load(boxes + kite * 4)
+        ky0 = tl.load(boxes + kite * 4 + 1)
+        kx1 = tl.load(boxes + kite * 4 + 2)
+        ky1 = tl.load(boxes + kite * 4 + 3)
+        inside = valid & (x >= kx0) & (x < kx1) & (y >= ky0) & (y < ky1)
+        out = tl.load(starts + kite) + (y - ky0) * (kx1 - kx0) + x - kx0
+        return tl.load(cover + out, mask=inside, other=0.0), out, inside
+
+    @triton.jit
+    def _alpha_forward(cover, kites, scale, scale_layer, scale_y, scale_x, boxes, starts, alpha, TILE: tl.constexpr):
+        """Alpha of each layer: its coverage, joined with its miter join's by
+        the larger value, times its opacity and clip."""
+        tile = tl.program_id(0)
+        layer = tl.program_id(1)
+        x0, y0, x1, y1, tiles_x, tiles = _layer_tiles(boxes, layer, TILE)
+        if tile < tiles:
+            tx, ty, x, y, valid = _tile_pixels(tile, tiles_x, x0, y0, x1, y1, TILE)
+            out = tl.load(starts + layer) + (y - y0) * (x1 - x0) + x - x0
+            c = tl.load(cover + out, mask=valid, other=0.0)
+            kite = tl.load(kites + layer)
+            if kite >= 0:
+                kite_c, kite_out, inside = _kite_cover(cover, boxes, starts, kite, x, y, valid)
+                c = tl.maximum(c, kite_c)
+            tl.store(alpha + out, c * tl.load(scale + layer * scale_layer + y * scale_y + x * scale_x, mask=valid, other=0.0), mask=valid)
+
+    @triton.jit
+    def _alpha_backward(grad_alpha, cover, kites, scale, scale_layer, scale_y, scale_x, boxes, starts, grad_cover, TILE: tl.constexpr):
+        """Gradient of each layer's and its miter join's coverage; the larger of the two takes it, a tie halves it."""
+        tile = tl.program_id(0)
+        layer = tl.program_id(1)
+        x0, y0, x1, y1, tiles_x, tiles = _layer_tiles(boxes, layer, TILE)
+        if tile < tiles:
+            tx, ty, x, y, valid = _tile_pixels(tile, tiles_x, x0, y0, x1, y1, TILE)
+            out = tl.load(starts + layer) + (y - y0) * (x1 - x0) + x - x0
+            g = tl.load(grad_alpha + out, mask=valid, other=0.0) * tl.load(scale + layer * scale_layer + y * scale_y + x * scale_x, mask=valid, other=0.0)
+            kite = tl.load(kites + layer)
+            if kite >= 0:
+                c = tl.load(cover + out, mask=valid, other=0.0)
+                kite_c, kite_out, inside = _kite_cover(cover, boxes, starts, kite, x, y, valid)
+                owner = tl.where(c > kite_c, 1.0, tl.where(c == kite_c, 0.5, 0.0))
+                tl.store(grad_cover + kite_out, g * (1.0 - owner), mask=inside)
+                g = g * owner
+            tl.store(grad_cover + out, g, mask=valid)
 
     @triton.jit
     def _cut_gradient(edges, grad_edges, cut, start: tl.constexpr, g, px, py, m):
@@ -163,14 +244,14 @@ if triton is not None:
             tl.atomic_add(grad_edges + cut * 4 + 3, g * (ny - wy), mask=m)
 
     @triton.jit
-    def _coverage_backward(edges, cuts, squares, widths, modes, dist, index, grad_cover, grad_edges, grad_widths, E, H, W, tiles_x, TILE: tl.constexpr):
+    def _coverage_backward(edges, cuts, squares, widths, modes, boxes, starts, dist, index, grad_cover, grad_edges, grad_widths, E, TILE: tl.constexpr):
         tile = tl.program_id(0)
         layer = tl.program_id(1)
-        i = tl.arange(0, TILE * TILE)
-        x = (tile % tiles_x) * TILE + i % TILE
-        y = (tile // tiles_x) * TILE + i // TILE
-        valid = (x < W) & (y < H)
-        out = layer * H * W + y * W + x
+        x0, y0, x1, y1, tiles_x, tiles = _layer_tiles(boxes, layer, TILE)
+        if tile >= tiles:
+            return
+        tx, ty, x, y, valid = _tile_pixels(tile, tiles_x, x0, y0, x1, y1, TILE)
+        out = tl.load(starts + layer) + (y - y0) * (x1 - x0) + x - x0
         e = tl.load(index + out, mask=valid, other=-1)
         g = tl.load(grad_cover + out, mask=valid, other=0.0)
         m = (e >= 0) & (g != 0)
@@ -182,7 +263,7 @@ if triton is not None:
         py = y.to(tl.float32) + 0.5
         rx = px - ax
         ry = py - ay
-        along = (rx * dx + ry * dy) / tl.maximum(dx * dx + dy * dy, 1e-12)
+        along = _edge_along(rx, ry, dx, dy)
         t = tl.minimum(tl.maximum(along, 0.0), 1.0)
         # The box filter's derivative is 1 within half a pixel of an outline,
         # hence 0 at every pixel center when outlines lie on the pixel grid.
@@ -193,24 +274,13 @@ if triton is not None:
             extend = tl.where(tl.load(squares + layer) != 0, half, 0.0)
             first = tl.load(cuts + e, mask=m, other=-1)
             last = tl.load(cuts + E + e, mask=m, other=-1)
-            t = tl.where(first == e, tl.minimum(along, 1.0), t)
-            t = tl.where(last == e, tl.maximum(along, t), t)
-            d = tl.sqrt((rx - t * dx) * (rx - t * dx) + (ry - t * dy) * (ry - t * dy))
-            band = tl.maximum(tl.minimum(d + half, 0.5) - tl.maximum(d - half, -0.5), 0.0)
+            t, d, band = _cut_band(along, t, first, last, e, rx, ry, dx, dy, half)
             outer = tl.maximum(1 - tl.abs(half - d), 0.0)
             inner = tl.maximum(1 - tl.abs(half + d), 0.0)
             cut_first = m & (first >= 0)
-            fx = tl.load(edges + first * 4, mask=cut_first, other=0.0)
-            fy = tl.load(edges + first * 4 + 1, mask=cut_first, other=0.0)
-            fdx = tl.load(edges + first * 4 + 2, mask=cut_first, other=1.0) - fx
-            fdy = tl.load(edges + first * 4 + 3, mask=cut_first, other=0.0) - fy
-            reach_start = ((px - fx) * fdx + (py - fy) * fdy) / tl.maximum(tl.sqrt(fdx * fdx + fdy * fdy), 1e-6) + extend
+            reach_start = _reach_start(edges, first, px, py, extend, cut_first)
             cut_last = m & (last >= 0)
-            lx = tl.load(edges + last * 4 + 2, mask=cut_last, other=1.0)
-            ly = tl.load(edges + last * 4 + 3, mask=cut_last, other=0.0)
-            ldx = lx - tl.load(edges + last * 4, mask=cut_last, other=0.0)
-            ldy = ly - tl.load(edges + last * 4 + 1, mask=cut_last, other=0.0)
-            reach_end = ((lx - px) * ldx + (ly - py) * ldy) / tl.maximum(tl.sqrt(ldx * ldx + ldy * ldy), 1e-6) + extend
+            reach_end = _reach_end(edges, last, px, py, extend, cut_last)
             cut_start = tl.where(cut_first, tl.minimum(tl.maximum(reach_start + 0.5, 0.0), 1.0), 1.0)
             cut_end = tl.where(cut_last, tl.minimum(tl.maximum(reach_end + 0.5, 0.0), 1.0), 1.0)
             g_start = tl.where(cut_first, g * band * cut_end * tl.maximum(1 - tl.abs(reach_start), 0.0), 0.0)
@@ -232,14 +302,20 @@ if triton is not None:
         tl.atomic_add(grad_edges + e * 4 + 3, scale * qy * t, mask=m)
 
     @triton.jit
-    def _kite_geometry(points, widths, corners, layers, limits, c, C, m):
-        """Unit tangents arriving at (a) and leaving (b) each corner and their
-        norms, the outer side of the turn, the half width signed toward it, the
-        miter scale k of the tip and whether k varies (miter limit holds)."""
+    def _kite_corners(corners, c, C, m):
+        """Offsets in the points of the head and tail of the arriving and leaving edge of each corner."""
         in_head = tl.load(corners + C + c, mask=m, other=0) * 2
         in_tail = tl.load(corners + 2 * C + c, mask=m, other=0) * 2
         out_head = tl.load(corners + 3 * C + c, mask=m, other=0) * 2
         out_tail = tl.load(corners + 4 * C + c, mask=m, other=0) * 2
+        return in_head, in_tail, out_head, out_tail
+
+    @triton.jit
+    def _kite_geometry(points, widths, corners, layers, limits, c, C, m):
+        """Unit tangents arriving at (a) and leaving (b) each corner and their
+        norms, the outer side of the turn, the half width signed toward it, the
+        miter scale k of the tip and whether k varies (miter limit holds)."""
+        in_head, in_tail, out_head, out_tail = _kite_corners(corners, c, C, m)
         ax = tl.load(points + in_head, mask=m, other=1.0) - tl.load(points + in_tail, mask=m, other=0.0)
         ay = tl.load(points + in_head + 1, mask=m, other=0.0) - tl.load(points + in_tail + 1, mask=m, other=0.0)
         bx = tl.load(points + out_head, mask=m, other=1.0) - tl.load(points + out_tail, mask=m, other=0.0)
@@ -309,10 +385,7 @@ if triton is not None:
         v = tl.load(corners + c, mask=m, other=0) * 2
         tl.atomic_add(grad_points + v, g0x + g1x + g2x + g3x, mask=m)
         tl.atomic_add(grad_points + v + 1, g0y + g1y + g2y + g3y, mask=m)
-        in_head = tl.load(corners + C + c, mask=m, other=0) * 2
-        in_tail = tl.load(corners + 2 * C + c, mask=m, other=0) * 2
-        out_head = tl.load(corners + 3 * C + c, mask=m, other=0) * 2
-        out_tail = tl.load(corners + 4 * C + c, mask=m, other=0) * 2
+        in_head, in_tail, out_head, out_tail = _kite_corners(corners, c, C, m)
         tl.atomic_add(grad_points + in_head, gax, mask=m)
         tl.atomic_add(grad_points + in_head + 1, gay, mask=m)
         tl.atomic_add(grad_points + in_tail, -gax, mask=m)
@@ -324,76 +397,105 @@ if triton is not None:
         tl.atomic_add(grad_widths + tl.load(layers + c, mask=m, other=0), 0.5 * side * g_half, mask=m)
 
     @triton.jit
-    def _composite_forward(alpha, colors, background, out, N, HW, BLOCK: tl.constexpr):
-        p = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        m = p < HW
-        r = tl.load(background + p, mask=m, other=1.0)
-        g = tl.load(background + HW + p, mask=m, other=1.0)
-        b = tl.load(background + 2 * HW + p, mask=m, other=1.0)
-        for n in range(N):
-            a = tl.load(alpha + n * HW + p, mask=m, other=0.0)
-            r += a * (tl.load(colors + n * 3) - r)
-            g += a * (tl.load(colors + n * 3 + 1) - g)
-            b += a * (tl.load(colors + n * 3 + 2) - b)
-        tl.store(out + p, r, mask=m)
-        tl.store(out + HW + p, g, mask=m)
-        tl.store(out + 2 * HW + p, b, mask=m)
+    def _load_rgb(base, HW, p, m, other):
+        return (tl.load(base + p, mask=m, other=other), tl.load(base + HW + p, mask=m, other=other),
+                tl.load(base + 2 * HW + p, mask=m, other=other))
 
     @triton.jit
-    def _composite_backward(alpha, colors, background, grad_out, weight, grad_alpha, grad_background, N, HW, BLOCK: tl.constexpr):
-        """Gradients of source-over compositing: `weight` first holds the transmittance
-        of the layers above each layer, then the layer's visible alpha. The
-        background shows through the transmittance of all the layers."""
-        p = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        m = p < HW
-        gr = tl.load(grad_out + p, mask=m, other=0.0)
-        gg = tl.load(grad_out + HW + p, mask=m, other=0.0)
-        gb = tl.load(grad_out + 2 * HW + p, mask=m, other=0.0)
-        above = tl.zeros((BLOCK,), tl.float32) + 1.0
+    def _box_pixels(boxes, starts, layer, tx, ty, x, y, valid, TILE: tl.constexpr):
+        """Whether the tile meets the layer's box, which of its pixels lie in it
+        and their offsets in the packed arrays."""
+        x0 = tl.load(boxes + layer * 4)
+        y0 = tl.load(boxes + layer * 4 + 1)
+        x1 = tl.load(boxes + layer * 4 + 2)
+        y1 = tl.load(boxes + layer * 4 + 3)
+        meets = (tx < x1) & (tx + TILE > x0) & (ty < y1) & (ty + TILE > y0)
+        inside = valid & (x >= x0) & (x < x1) & (y >= y0) & (y < y1)
+        return meets, inside, tl.load(starts + layer) + (y - y0) * (x1 - x0) + x - x0
+
+    @triton.jit
+    def _composite_forward(alpha, colors, background, boxes, starts, first, out, N, H, W, tiles_x, TILE: tl.constexpr):
+        tx, ty, x, y, valid = _tile_pixels(tl.program_id(0), tiles_x, 0, 0, W, H, TILE)
+        HW = H * W
+        p = y * W + x
+        r, g, b = _load_rgb(background, HW, p, valid, 1.0)
+        for n in range(N):
+            meets, inside, packed = _box_pixels(boxes, starts, first + n, tx, ty, x, y, valid, TILE)
+            if meets:
+                a = tl.load(alpha + packed, mask=inside, other=0.0)
+                r += a * (tl.load(colors + n * 3) - r)
+                g += a * (tl.load(colors + n * 3 + 1) - g)
+                b += a * (tl.load(colors + n * 3 + 2) - b)
+        tl.store(out + p, r, mask=valid)
+        tl.store(out + HW + p, g, mask=valid)
+        tl.store(out + 2 * HW + p, b, mask=valid)
+
+    @triton.jit
+    def _composite_backward(alpha, colors, background, boxes, starts, first, grad_out, weight, grad_alpha, grad_colors, grad_background, N, H, W, tiles_x, TILE: tl.constexpr):
+        """Gradients of source-over compositing: `weight` holds the transmittance
+        of the layers above each layer. The background shows through the
+        transmittance of all the layers."""
+        tx, ty, x, y, valid = _tile_pixels(tl.program_id(0), tiles_x, 0, 0, W, H, TILE)
+        HW = H * W
+        p = y * W + x
+        gr, gg, gb = _load_rgb(grad_out, HW, p, valid, 0.0)
+        above = tl.zeros((TILE * TILE,), tl.float32) + 1.0
         for k in range(N):
             n = N - 1 - k
-            tl.store(weight + n * HW + p, above, mask=m)
-            above *= 1 - tl.load(alpha + n * HW + p, mask=m, other=0.0)
-        tl.store(grad_background + p, gr * above, mask=m)
-        tl.store(grad_background + HW + p, gg * above, mask=m)
-        tl.store(grad_background + 2 * HW + p, gb * above, mask=m)
-        r = tl.load(background + p, mask=m, other=1.0)
-        g = tl.load(background + HW + p, mask=m, other=1.0)
-        b = tl.load(background + 2 * HW + p, mask=m, other=1.0)
+            meets, inside, packed = _box_pixels(boxes, starts, first + n, tx, ty, x, y, valid, TILE)
+            if meets:
+                tl.store(weight + packed, above, mask=inside)
+                above *= 1 - tl.load(alpha + packed, mask=inside, other=0.0)
+        tl.store(grad_background + p, gr * above, mask=valid)
+        tl.store(grad_background + HW + p, gg * above, mask=valid)
+        tl.store(grad_background + 2 * HW + p, gb * above, mask=valid)
+        r, g, b = _load_rgb(background, HW, p, valid, 1.0)
         for n in range(N):
-            a = tl.load(alpha + n * HW + p, mask=m, other=0.0)
-            above = tl.load(weight + n * HW + p, mask=m, other=0.0)
-            cr = tl.load(colors + n * 3)
-            cg = tl.load(colors + n * 3 + 1)
-            cb = tl.load(colors + n * 3 + 2)
-            tl.store(grad_alpha + n * HW + p, above * (gr * (cr - r) + gg * (cg - g) + gb * (cb - b)), mask=m)
-            tl.store(weight + n * HW + p, a * above, mask=m)
-            r += a * (cr - r)
-            g += a * (cg - g)
-            b += a * (cb - b)
+            meets, inside, packed = _box_pixels(boxes, starts, first + n, tx, ty, x, y, valid, TILE)
+            if meets:
+                a = tl.load(alpha + packed, mask=inside, other=0.0)
+                above = tl.load(weight + packed, mask=inside, other=0.0)
+                cr = tl.load(colors + n * 3)
+                cg = tl.load(colors + n * 3 + 1)
+                cb = tl.load(colors + n * 3 + 2)
+                tl.store(grad_alpha + packed, above * (gr * (cr - r) + gg * (cg - g) + gb * (cb - b)), mask=inside)
+                visible = a * above
+                tl.atomic_add(grad_colors + n * 3, tl.sum(visible * gr, 0))
+                tl.atomic_add(grad_colors + n * 3 + 1, tl.sum(visible * gg, 0))
+                tl.atomic_add(grad_colors + n * 3 + 2, tl.sum(visible * gb, 0))
+                r += a * (cr - r)
+                g += a * (cg - g)
+                b += a * (cb - b)
 
 
-class _LayerCoverage(torch.autograd.Function):
+class _LayerAlpha(torch.autograd.Function):
+    """Alpha of every layer over the pixels of its box, packed: the boxes' pixels row by row, one layer after the other."""
+
     @staticmethod
-    def forward(ctx, edges, cuts, squares, widths, offsets, boxes, modes, height, width):
-        layers = modes.numel()
-        cover = torch.empty((layers, height, width), device=edges.device)
+    def forward(ctx, edges, cuts, squares, widths, offsets, modes, kites, scale, boxes, starts, height, width):
+        visible = len(kites)
+        total, shown = starts[[-1, visible]].tolist()
+        cover = torch.empty(total, device=edges.device)
         dist = torch.empty_like(cover)
-        index = torch.empty((layers, height, width), device=edges.device, dtype=torch.int32)
-        tiles_x = triton.cdiv(width, TILE)
-        _coverage_forward[(tiles_x * triton.cdiv(height, TILE), layers)](edges, cuts, squares, widths, offsets, boxes, modes, cover, dist, index, len(edges), height, width, tiles_x, FAR=FAR, TILE=TILE)
-        ctx.save_for_backward(edges, cuts, squares, widths, modes, dist, index)
-        return cover
+        index = torch.empty(total, device=edges.device, dtype=torch.int32)
+        alpha = torch.empty(shown, device=edges.device)
+        tiles = triton.cdiv(width, TILE) * triton.cdiv(height, TILE)
+        _coverage_forward[(tiles, len(modes))](edges, cuts, squares, widths, offsets, boxes, starts, modes, cover, dist, index, len(edges), TILE=TILE)
+        ctx.strides = scale.stride()
+        _alpha_forward[(tiles, visible)](cover, kites, scale, *ctx.strides, boxes, starts, alpha, TILE=TILE)
+        ctx.save_for_backward(edges, cuts, squares, widths, modes, kites, scale, boxes, starts, cover, dist, index)
+        ctx.tiles = tiles
+        return alpha
 
     @staticmethod
-    def backward(ctx, grad_cover):
-        edges, cuts, squares, widths, modes, dist, index = ctx.saved_tensors
-        layers, height, width = dist.shape
+    def backward(ctx, grad_alpha):
+        edges, cuts, squares, widths, modes, kites, scale, boxes, starts, cover, dist, index = ctx.saved_tensors
+        grad_cover = torch.empty_like(cover)
         grad_edges = torch.zeros_like(edges)
         grad_widths = torch.zeros_like(widths)
-        tiles_x = triton.cdiv(width, TILE)
-        _coverage_backward[(tiles_x * triton.cdiv(height, TILE), layers)](edges, cuts, squares, widths, modes, dist, index, grad_cover.contiguous(), grad_edges, grad_widths, len(edges), height, width, tiles_x, TILE=TILE)
-        return grad_edges, None, None, grad_widths, None, None, None, None, None
+        _alpha_backward[(ctx.tiles, len(kites))](grad_alpha.contiguous(), cover, kites, scale, *ctx.strides, boxes, starts, grad_cover, TILE=TILE)
+        _coverage_backward[(ctx.tiles, len(modes))](edges, cuts, squares, widths, modes, boxes, starts, dist, index, grad_cover, grad_edges, grad_widths, len(edges), TILE=TILE)
+        return grad_edges, None, None, grad_widths, None, None, None, None, None, None, None, None
 
 
 class _MiterKites(torch.autograd.Function):
@@ -431,27 +533,30 @@ class _Flatten(torch.autograd.Function):
 
 
 class _Composite(torch.autograd.Function):
-    """Source-over of solid-color layers with per-pixel alpha onto a [3,H,W] background."""
+    """Source-over of solid-color layers with packed alpha onto a [3,H,W] background: `colors` are those of the layers from `first` on."""
 
     @staticmethod
-    def forward(ctx, alpha, colors, background):
-        layers, height, width = alpha.shape
+    def forward(ctx, alpha, colors, background, boxes, starts, first):
+        _, height, width = background.shape
         background = background.contiguous()
-        out = torch.empty((3, height, width), device=alpha.device)
-        _composite_forward[(triton.cdiv(height * width, 256),)](alpha, colors, background, out, layers, height * width, BLOCK=256)
-        ctx.save_for_backward(alpha, colors, background)
+        out = torch.empty_like(background)
+        tiles_x = triton.cdiv(width, TILE)
+        _composite_forward[(tiles_x * triton.cdiv(height, TILE),)](alpha, colors, background, boxes, starts, first, out, len(colors), height, width, tiles_x, TILE=TILE)
+        ctx.save_for_backward(alpha, colors, background, boxes, starts)
+        ctx.first = first
         return out
 
     @staticmethod
     def backward(ctx, grad_out):
-        alpha, colors, background = ctx.saved_tensors
-        layers, height, width = alpha.shape
+        alpha, colors, background, boxes, starts = ctx.saved_tensors
+        _, height, width = background.shape
         weight = torch.empty_like(alpha)
-        grad_alpha = torch.empty_like(alpha)
+        grad_alpha = torch.zeros_like(alpha)
+        grad_colors = torch.zeros_like(colors)
         grad_background = torch.empty_like(background)
-        grad_out = grad_out.contiguous()
-        _composite_backward[(triton.cdiv(height * width, 256),)](alpha, colors, background, grad_out, weight, grad_alpha, grad_background, layers, height * width, BLOCK=256)
-        return grad_alpha, weight.view(layers, -1) @ grad_out.view(3, -1).T, grad_background
+        tiles_x = triton.cdiv(width, TILE)
+        _composite_backward[(tiles_x * triton.cdiv(height, TILE),)](alpha, colors, background, boxes, starts, ctx.first, grad_out.contiguous(), weight, grad_alpha, grad_colors, grad_background, len(colors), height, width, tiles_x, TILE=TILE)
+        return grad_alpha, grad_colors, grad_background, None, None, None
 
 
 def _near_pixels(edges, pad, height, width):
@@ -476,9 +581,14 @@ def _first_by_rank(key, *ranks):
     return keep
 
 
-def _winding(edges, edge_layer, layers, height, width):
-    """Winding number of every pixel center per layer: each edge crossing a
-    pixel row counts for the pixels left of the crossing, +1 upward, -1 downward."""
+def _winding(edges, edge_layer, boxes, offsets, fill, height):
+    """Winding number of every pixel center in each fill layer's box, the boxes
+    packed back to back: each edge crossing a pixel row counts for the pixels
+    left of the crossing, +1 upward, -1 downward."""
+    x0, y0, x1, y1 = boxes.unbind(1)
+    width, rows = x1 - x0, torch.where(fill, y1 - y0, 0)
+    stride = width + 1
+    steps_start = (rows * stride).cumsum(0) - rows * stride
     ax, ay, bx, by = edges.unbind(1)
     first = (torch.minimum(ay, by) - 0.5).ceil().long().clamp(0, height)
     counts = ((torch.maximum(ay, by) - 0.5).ceil().long().clamp(0, height) - first).clamp(min=0)
@@ -486,19 +596,28 @@ def _winding(edges, edge_layer, layers, height, width):
     row = first[edge] + torch.arange(len(edge), device=edges.device) - torch.repeat_interleave(counts.cumsum(0) - counts, counts)
     cross = ax[edge] + (row + 0.5 - ay[edge]) * (bx[edge] - ax[edge]) / (by[edge] - ay[edge])
     sign = torch.where(by[edge] > ay[edge], 1, -1).int()
-    base = (edge_layer[edge] * height + row) * (width + 1)
-    steps = torch.zeros(layers * height * (width + 1), dtype=torch.int32, device=edges.device)
+    layer = edge_layer[edge]
+    base = steps_start[layer] + (row - y0[layer]) * stride[layer]
+    steps = torch.zeros(int((rows * stride).sum()), dtype=torch.int32, device=edges.device)
     steps.index_add_(0, base, sign)
-    steps.index_add_(0, base + (cross - 0.5).ceil().long().clamp(0, width), -sign)
-    return steps.view(layers, height, width + 1).cumsum(2, dtype=torch.int32)[..., :width]
+    steps.index_add_(0, base + torch.minimum(((cross - 0.5).ceil().long() - x0[layer]).clamp(min=0), width[layer]), -sign)
+    winding = torch.zeros(int(offsets[-1]), dtype=torch.int32, device=edges.device)
+    for start, offset, w, h in zip(steps_start.tolist(), offsets.tolist(), width.tolist(), rows.tolist()):
+        winding[offset:offset + h * w].view(h, w).copy_(steps[start:start + h * (w + 1)].view(h, w + 1).cumsum(1, dtype=torch.int32)[:, :w])
+    return winding
+
+
+def _along(edges, px, py):
+    """Direction of each edge, the pixel's offset from its start and its position along it, unclamped."""
+    ax, ay, bx, by = edges.unbind(1)
+    dx, dy, rx, ry = bx - ax, by - ay, px - ax, py - ay
+    return dx, dy, rx, ry, (rx * dx + ry * dy) / (dx * dx + dy * dy).clamp(min=1e-12)
 
 
 def _stroke_terms(edges, cuts, half, extend, e, px, py):
     """Per pixel and stroke edge, as in _coverage_forward: the band before the
     cuts at butt or square open ends, each cut's reach and factor."""
-    ax, ay, bx, by = edges[e].unbind(1)
-    dx, dy, rx, ry = bx - ax, by - ay, px - ax, py - ay
-    along = (rx * dx + ry * dy) / (dx * dx + dy * dy).clamp(min=1e-12)
+    dx, dy, rx, ry, along = _along(edges[e], px, py)
     t = along.clamp(0, 1)
     d2 = (rx - t * dx).square() + (ry - t * dy).square()
     first, last = cuts[0, e].long(), cuts[1, e].long()
@@ -536,30 +655,33 @@ def _add_cut_gradient(edges, grad_edges, cut, start, g, px, py):
 
 
 class _NearCoverage(torch.autograd.Function):
-    """_LayerCoverage's coverage and gradients in PyTorch, for the CPU and other
+    """_LayerAlpha's coverage and gradients in PyTorch, for the CPU and other
     devices. Only pixels near an outline need distances: a fill's coverage is
     its inside test beyond half a pixel and its gradient vanishes beyond one;
-    a stroke reaches half its width, plus its square cap and that pixel."""
+    a stroke reaches half its width, plus its square cap and that pixel. The
+    coverage is packed: the pixels of each layer's box, row by row, one layer
+    after the other (`offsets` marks where each begins)."""
 
     @staticmethod
-    def forward(ctx, edges, cuts, squares, widths, modes, edge_layer, height, width):
-        layers = len(modes)
+    def forward(ctx, edges, cuts, squares, widths, modes, edge_layer, boxes, offsets, height, width):
+        boxes = boxes.long()
+        x0, y0, x1, _ = boxes.unbind(1)
+        box_width, start = x1 - x0, offsets[:-1]
         stroke = modes[edge_layer] == STROKE
         fills = (~stroke).nonzero()[:, 0]
-        winding = _winding(edges[fills], edge_layer[fills], layers, height, width)
-        winding[modes == FILL_EVENODD] &= 1
-        inside = (winding != 0).view(-1)
-        cover = inside.to(edges.dtype)
+        winding = _winding(edges[fills], edge_layer[fills], boxes, offsets, modes != STROKE, height)
+        parity = torch.where(modes == FILL_EVENODD, 1, -1).int().repeat_interleave(offsets.diff())
+        cover = ((winding & parity) != 0).to(edges.dtype)
         e, y, x = _near_pixels(edges[fills], edges.new_ones(len(fills)), height, width)
         e = fills[e]
-        ax, ay, bx, by = edges[e].unbind(1)
-        dx, dy, rx, ry = bx - ax, by - ay, x + 0.5 - ax, y + 0.5 - ay
-        t = ((rx * dx + ry * dy) / (dx * dx + dy * dy).clamp(min=1e-12)).clamp(0, 1)
+        dx, dy, rx, ry, t = _along(edges[e], x + 0.5, y + 0.5)
+        t = t.clamp(0, 1)
         d2 = (rx - t * dx).square() + (ry - t * dy).square()
-        key = (edge_layer[e] * height + y) * width + x
+        layer = edge_layer[e]
+        key = start[layer] + (y - y0[layer]) * box_width[layer] + x - x0[layer]
         nearest = _first_by_rank(key, d2, e)
-        fill_key, fill_edge = key[nearest], e[nearest]
-        signed = torch.where(inside[fill_key], d2[nearest].sqrt(), -d2[nearest].sqrt())
+        fill_key, fill_edge, fill_x, fill_y = key[nearest], e[nearest], x[nearest], y[nearest]
+        signed = torch.where(cover[fill_key] != 0, d2[nearest].sqrt(), -d2[nearest].sqrt())
         cover[fill_key] = (signed + 0.5).clamp(0, 1)
         strokes = stroke.nonzero()[:, 0]
         half = widths[edge_layer[strokes]] * 0.5
@@ -568,30 +690,26 @@ class _NearCoverage(torch.autograd.Function):
         half = widths[edge_layer[e]] * 0.5
         *_, d2, band, _, _, _, _, cut_start, cut_end = _stroke_terms(edges, cuts, half, torch.where(squares[edge_layer[e]] != 0, half, 0.0), e, x + 0.5, y + 0.5)
         band = band * cut_start * cut_end
-        key = (edge_layer[e] * height + y) * width + x
+        layer = edge_layer[e]
+        key = start[layer] + (y - y0[layer]) * box_width[layer] + x - x0[layer]
         best = _first_by_rank(key, -band, d2, e)
-        stroke_key, stroke_edge = key[best], e[best]
+        stroke_key, stroke_edge, stroke_x, stroke_y = key[best], e[best], x[best], y[best]
         cover[stroke_key] = band[best]
-        ctx.save_for_backward(edges, cuts, squares, widths, edge_layer, fill_key, fill_edge, signed, stroke_key, stroke_edge)
-        ctx.size = height, width
-        return cover.view(layers, height, width)
+        ctx.save_for_backward(edges, cuts, squares, widths, edge_layer, fill_key, fill_edge, fill_x, fill_y, signed, stroke_key, stroke_edge, stroke_x, stroke_y)
+        return cover
 
     @staticmethod
     def backward(ctx, grad_cover):
-        edges, cuts, squares, widths, edge_layer, fill_key, fill_edge, signed, stroke_key, stroke_edge = ctx.saved_tensors
-        height, width = ctx.size
-        grad_cover = grad_cover.reshape(-1)
+        edges, cuts, squares, widths, edge_layer, fill_key, fill_edge, fill_x, fill_y, signed, stroke_key, stroke_edge, stroke_x, stroke_y = ctx.saved_tensors
         grad_edges = torch.zeros_like(edges)
         grad_widths = torch.zeros_like(widths)
         # The 2 px tent filter's derivative, as in _coverage_backward.
         g = grad_cover[fill_key]
-        px, py = fill_key % width + 0.5, fill_key // width % height + 0.5
-        ax, ay, bx, by = edges[fill_edge].unbind(1)
-        dx, dy, rx, ry = bx - ax, by - ay, px - ax, py - ay
-        t = ((rx * dx + ry * dy) / (dx * dx + dy * dy).clamp(min=1e-12)).clamp(0, 1)
+        dx, dy, rx, ry, t = _along(edges[fill_edge], fill_x + 0.5, fill_y + 0.5)
+        t = t.clamp(0, 1)
         _add_edge_gradient(grad_edges, fill_edge, torch.where(signed >= 0, g, -g) * (1 - signed.abs()).clamp(min=0), t, dx, dy, rx, ry)
         g = grad_cover[stroke_key]
-        px, py = stroke_key % width + 0.5, stroke_key // width % height + 0.5
+        px, py = stroke_x + 0.5, stroke_y + 0.5
         layer = edge_layer[stroke_edge]
         half = widths[layer] * 0.5
         square = squares[layer] != 0
@@ -605,7 +723,7 @@ class _NearCoverage(torch.autograd.Function):
         _add_cut_gradient(edges, grad_edges, first, True, g_start, px, py)
         _add_cut_gradient(edges, grad_edges, last, False, g_end, px, py)
         _add_edge_gradient(grad_edges, stroke_edge, g * (inner - outer), t, dx, dy, rx, ry)
-        return grad_edges, None, None, grad_widths, None, None, None, None
+        return grad_edges, None, None, grad_widths, None, None, None, None, None, None
 
 
 def _kites(points, widths, corners, layers, limits):
@@ -621,40 +739,47 @@ def _kites(points, widths, corners, layers, limits):
 
 
 class _TorchComposite(torch.autograd.Function):
-    """_Composite in PyTorch, one layer at a time like the kernels: no buffer
-    of all layers in the forward pass, one for the transmittances in the backward."""
+    """_Composite in PyTorch: each layer's alpha covers its box [x0,y0,x1,y1)
+    only and is zero elsewhere. One layer at a time like the kernels: no
+    buffer of all layers in the forward pass, the transmittances in the
+    backward pass take the size of the alpha."""
 
     @staticmethod
-    def forward(ctx, alpha, colors, background):
-        layers, height, width = alpha.shape
-        alpha = alpha.reshape(layers, -1)
-        out = background.reshape(3, -1).clone()
-        for layer in range(layers):
-            out.lerp_(colors[layer][:, None], alpha[layer])
-        ctx.save_for_backward(alpha, colors, background)
-        return out.view(3, height, width)
+    def forward(ctx, alpha, colors, background, boxes, starts, first):
+        out = background.clone()
+        last = first + len(colors)
+        for color, (x0, y0, x1, y1), start, stop in zip(colors, boxes[first:last].tolist(), starts[first:last].tolist(), starts[first + 1:last + 1].tolist()):
+            out[:, y0:y1, x0:x1].lerp_(color[:, None, None], alpha[start:stop].view(y1 - y0, x1 - x0))
+        ctx.save_for_backward(alpha, colors, background, boxes, starts)
+        ctx.first = first
+        return out
 
     @staticmethod
     def backward(ctx, grad_out):
-        alpha, colors, background = ctx.saved_tensors
-        grad_out = grad_out.reshape(3, -1)
+        alpha, colors, background, boxes, starts = ctx.saved_tensors
+        last = ctx.first + len(colors)
+        grad_out = grad_out.contiguous()
+        layers = list(zip(boxes[ctx.first:last].tolist(), starts[ctx.first:last].tolist(), starts[ctx.first + 1:last + 1].tolist()))
         # Transmittance of the layers above each layer, built from the top; what
         # is left at the end is the background's.
         above = torch.empty_like(alpha)
-        through = torch.ones_like(alpha[0])
-        for layer in range(len(alpha) - 1, -1, -1):
-            above[layer] = through
-            through = through * (1 - alpha[layer])
-        toward = colors @ grad_out
+        through = torch.ones_like(grad_out[0])
+        for (x0, y0, x1, y1), start, stop in reversed(layers):
+            box = through[y0:y1, x0:x1]
+            above[start:stop].view_as(box).copy_(box)
+            box.mul_(1 - alpha[start:stop].view_as(box))
         # grad_out . composite below each layer, built bottom-up from the background.
-        below = (grad_out * background.reshape(3, -1)).sum(0)
-        grad_alpha = torch.empty_like(alpha)
+        below = (grad_out * background).sum(0)
+        grad_alpha = torch.zeros_like(alpha)
         grad_colors = torch.empty_like(colors)
-        for layer in range(len(alpha)):
-            torch.mul(above[layer], toward[layer] - below, out=grad_alpha[layer])
-            grad_colors[layer] = grad_out @ (alpha[layer] * above[layer])
-            below = torch.lerp(below, toward[layer], alpha[layer])
-        return grad_alpha.view(-1, *background.shape[1:]), grad_colors, (grad_out * through).view_as(background)
+        for color, grad_color, ((x0, y0, x1, y1), start, stop) in zip(colors, grad_colors, layers):
+            grad = grad_out[:, y0:y1, x0:x1].reshape(3, -1)
+            box = below[y0:y1, x0:x1]
+            toward = (color @ grad).view_as(box)
+            torch.mul(above[start:stop].view_as(box), toward - box, out=grad_alpha[start:stop].view_as(box))
+            grad_color.copy_(grad @ (alpha[start:stop] * above[start:stop]))
+            box.lerp_(toward, alpha[start:stop].view_as(box))
+        return grad_alpha, grad_colors, grad_out * through, None, None, None
 
 
 class _Plan:
@@ -770,9 +895,15 @@ class _Plan:
             squares += [False] * len(counts)
         self.cuts = torch.from_numpy(np.concatenate(cuts, 1)).to(device)
         self.squares = torch.tensor(squares, device=device, dtype=torch.int32)
+        self.kites = torch.full((self.layers,), -1, device=device, dtype=torch.int32)
+        self.kites[self.miter_owners] = torch.arange(len(self.miter_owners), device=device, dtype=torch.int32) + self.layers
         self.edge_layer = torch.repeat_interleave(torch.arange(len(modes), device=device), torch.from_numpy(np.diff(offsets)).to(device))
         self.offsets = torch.tensor(offsets, device=device, dtype=torch.int32)
         self.modes = torch.tensor(modes, device=device, dtype=torch.int32)
+        stroke = self.modes == STROKE
+        self.reach = torch.where(stroke, 0.5 * (1 + (self.squares != 0)), 0.0)
+        self.margin = torch.where(stroke, 2.0, 1.0)
+        self.limit = torch.tensor([scene.width, scene.height], device=device)
         self.colors = torch.tensor(colors, device=device, dtype=torch.float32)
         self.widths = torch.tensor(widths, device=device, dtype=torch.float32)
         self.tune_colors = torch.tensor(tune_colors, device=device, dtype=torch.float32)[:, None]
@@ -790,43 +921,78 @@ class _Plan:
         ring = (_MiterKites.apply if self.triton else _kites)(full, widths, self.corners, self.corner_layer, self.corner_limit)
         return torch.cat([ring, ring.roll(-1, 1)], 2).reshape(-1, 4)
 
-    def coverage(self, points, widths):
+    def _boxes(self, edges, widths):
+        """Pixel box (x0, y0, x1, y1) of each layer, the bounding box of its edges
+        grown by the reach of _near_pixels, and the offsets of the layers' boxes
+        in a packed array of their pixels. A miter-joined stroke's box holds its
+        quadrilaterals' too."""
+        ends = edges.view(-1, 2, 2)
+        layer = self.edge_layer[:, None].expand(-1, 4)
+        # The least corner of each layer's edges and the negated greatest.
+        extent = torch.full((len(self.modes), 4), FAR, device=edges.device).scatter_reduce(0, layer, torch.cat([ends.amin(1), -ends.amax(1)], 1), "amin")
+        extent -= (widths * self.reach + self.margin)[:, None]
+        start = (extent[:, :2] - 0.5).ceil().long()
+        stop = (-extent[:, 2:] - 0.5).floor().long() + 1
+        owners = self.miter_owners
+        start[owners] = torch.minimum(start[owners], start[self.layers:])
+        stop[owners] = torch.maximum(stop[owners], stop[self.layers:])
+        start = torch.minimum(start.clamp(min=0), self.limit)
+        stop = torch.maximum(torch.minimum(stop, self.limit), start)
+        areas = (stop - start).prod(1)
+        return torch.cat([start, stop], 1).int(), F.pad(areas.cumsum(0), (1, 0))
+
+    def _merge_kites(self, cover, boxes, offsets):
+        """A miter join adds its quadrilaterals to the round-joined stroke band."""
+        parts = list(cover.split(offsets.diff().tolist()))
+        boxes = boxes.tolist()
+        for owner, kite in zip(self.miter_owners.tolist(), range(self.layers, len(boxes))):
+            x0, y0, x1, y1 = boxes[owner]
+            kx0, ky0, kx1, ky1 = boxes[kite]
+            if kx1 > kx0 and ky1 > ky0:
+                ring = F.pad(parts[kite].view(ky1 - ky0, kx1 - kx0), (kx0 - x0, x1 - kx1, ky0 - y0, y1 - ky1)).view(-1)
+            else:
+                ring = torch.zeros_like(parts[owner])
+            parts[owner] = torch.maximum(parts[owner], ring)
+        return torch.cat(parts[:self.layers])
+
+    def alpha(self, points, widths):
+        """The layers' alpha packed over their boxes, with the boxes and the packed offsets."""
         edges = _Flatten.apply(points, self.flatten, self.flatten_t).view(2, -1, 2).transpose(0, 1).reshape(-1, 4)
         if len(self.miter_owners):
             edges = torch.cat([edges, self._miter_kites(points, widths)])
             widths = torch.cat([widths, widths.new_zeros(len(self.miter_owners))])
+        boxes, offsets = self._boxes(edges.detach(), widths.detach())
+        scale = self.scale.expand(-1, *self.size)
         if self.triton:
-            ends = edges.detach().view(-1, 2, 2)
-            layer = self.edge_layer[:, None].expand(-1, 2)
-            pad = (widths.detach() / 2 + 1)[:, None]
-            boxes = torch.cat([
-                torch.full((len(self.modes), 2), FAR, device=edges.device).scatter_reduce(0, layer, ends.amin(1), "amin") - pad,
-                torch.full((len(self.modes), 2), -FAR, device=edges.device).scatter_reduce(0, layer, ends.amax(1), "amax") + pad,
-            ], 1)
-            cover = _LayerCoverage.apply(edges, self.cuts, self.squares, widths, self.offsets, boxes, self.modes, *self.size)
+            alpha = _LayerAlpha.apply(edges, self.cuts, self.squares, widths, self.offsets, self.modes, self.kites, scale, boxes, offsets, *self.size)
         else:
-            cover = _NearCoverage.apply(edges, self.cuts, self.squares, widths, self.modes, self.edge_layer, *self.size)
-        if len(self.miter_owners):
-            # A miter join adds its quadrilateral to the round-joined stroke band.
-            cover = cover[:self.layers].index_put((self.miter_owners,), torch.maximum(cover[self.miter_owners], cover[self.layers:]))
-        return cover
+            cover = _NearCoverage.apply(edges, self.cuts, self.squares, widths, self.modes, self.edge_layer, boxes, offsets, *self.size)
+            if len(self.miter_owners):
+                cover = self._merge_kites(cover, boxes, offsets)
+            alpha = cover * torch.cat([scale[layer, y0:y1, x0:x1].reshape(-1) for layer, (x0, y0, x1, y1) in enumerate(boxes[:self.layers].tolist())])
+        return alpha, boxes[:self.layers], offsets[:self.layers + 1]
 
-    def composite(self, alpha, colors):
+    def dense(self, alpha, boxes, offsets):
+        """Alpha as [L,H,W]."""
+        dense = alpha.new_zeros(self.layers, *self.size)
+        for layer, (x0, y0, x1, y1), start, stop in zip(range(self.layers), boxes.tolist(), offsets.tolist(), offsets[1:].tolist()):
+            dense[layer, y0:y1, x0:x1] = alpha[start:stop].view(y1 - y0, x1 - x0)
+        return dense
+
+    def composite(self, alpha, colors, boxes, offsets):
         """The layers over white, with the fixed layers between them."""
         over = (_Composite if self.triton else _TorchComposite).apply
-        out, start = alpha.new_ones(3, *alpha.shape[1:]), 0
-        if not self.runs:
-            # A slice of alpha would turn its gradient into a zeroed copy of it.
-            return over(alpha, colors, out)
-        for stop, color, cover in self.runs + [(len(alpha), None, None)]:
+        out, start = alpha.new_ones(3, *self.size), 0
+        for stop, color, cover in self.runs + [(self.layers, None, None)]:
             if stop > start:
-                out, start = over(alpha[start:stop], colors[start:stop], out), stop
+                out, start = over(alpha, colors[start:stop], out, boxes, offsets, start), stop
             if color is not None:
                 out = color + (1 - cover) * out
         return out
 
     def render(self, points, colors, widths):
-        return self.composite(self.coverage(points, widths) * self.scale, colors)
+        alpha, boxes, offsets = self.alpha(points, widths)
+        return self.composite(alpha, colors, boxes, offsets)
 
     def write_back(self, scene, points, colors, widths):
         points = (self.expand @ points.detach().cpu().numpy()).astype(np.float32)
@@ -884,7 +1050,7 @@ def _clip_coverage(clips, width, height, device):
         layer_regions.append([regions[key][0] for key in keys])
     shapes = [Shape(list(region), [True] * len(region), [np.zeros(len(subpath) // 3, bool) for subpath in region], (0.0, 0.0, 0.0, 1.0), "nonzero", None, 0.0, []) for _, region in regions.values()]
     plan = _Plan(Scene(width, height, shapes), [None] * (len(shapes) + 1), device)
-    region_alpha = plan.coverage(plan.points, plan.widths)
+    region_alpha = plan.dense(*plan.alpha(plan.points, plan.widths))
     factors = torch.ones((len(clips), height, width), device=device)
     for factor, indices in zip(factors, layer_regions):
         for index in indices:
@@ -931,8 +1097,9 @@ def removal_costs(scene, fixed, target):
     """Per shape, the increase of the mean squared error if only that shape
     (its fill and stroke layers together) were removed."""
     plan = _Plan(scene, fixed, target.device)
-    alpha = plan.coverage(plan.points, plan.widths) * plan.scale
-    residual = plan.composite(alpha, plan.colors) - target
+    alpha, boxes, offsets = plan.alpha(plan.points, plan.widths)
+    residual = plan.composite(alpha, plan.colors, boxes, offsets) - target
+    alpha = plan.dense(alpha, boxes, offsets)
     # Transmittance of what is above each layer, fixed layers included, built in place from the top.
     above = torch.empty_like(alpha)
     through = torch.ones_like(target[0])

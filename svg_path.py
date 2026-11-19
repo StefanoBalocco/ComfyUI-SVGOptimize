@@ -2,7 +2,7 @@
 import re
 from decimal import Decimal, Inexact
 
-from .svg_numbers import EXACT, NUMBER, SEPARATOR, SPACE, format_number, join_numbers, separator
+from .svg_values import EXACT, NUMBER, SEPARATOR, SPACE, format_number, join_numbers, separator
 
 ARGUMENTS = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7, "Z": 0}
 COMMANDS = "MmLlHhVvCcSsQqTtAaZz"
@@ -168,10 +168,17 @@ def translate_path(segments, dx, dy):
 
 
 def rewrite_path(d, written):
+    """The shortest text of the path data, or None; `written` holds the text and the segments of each path data seen or written."""
     if d not in written:
         segments = parse_path(d)
         text = None if segments is None else format_path(segments)
-        written[d] = text
+        written[d] = text, segments
         if text is not None:
-            written[text] = text
-    return written[d]
+            written[text] = text, segments
+    return written[d][0]
+
+
+def path_segments(d, written):
+    """The segments of the path data, or None, through the cache of `rewrite_path`."""
+    rewrite_path(d, written)
+    return written[d][1]

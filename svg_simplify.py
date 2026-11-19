@@ -10,11 +10,11 @@ import torch
 from cairosvg.helpers import node_format
 from cairosvg.parser import Tree
 
-from .svg_document import SVG_NS, document_facts, elements, local_name, parse_svg, remove_node, serialize
+from .svg_document import SVG_NS, document_facts, elements, inherited, local_name, parse_svg, remove_node, serialize
 from .svg_fit import merge_segments, optimize, removal_costs, render
-from .svg_scene import KEY, Scene, capture_svg, hex_color, number, path_data, render_layer
+from .svg_scene import KEY, Scene, capture_svg, number, path_data, render_layer, rgba_text
 from .svg_structure import references
-from .svg_values import set_property
+from .svg_values import read_color, set_property
 
 # Longest side of the raster the shapes are fitted on, in pixels.
 SIZE = 512
@@ -26,8 +26,8 @@ STEPS = 100
 # A cubic whose control points lie this close to its chord, in raster pixels, is drawn straight.
 STRAIGHT = 0.05
 TOLERANCES = (1.0, 0.5, 0.25)
-# Most optimization trials per document: dropping shapes, then one per tolerance.
-TRIALS = 1 + len(TOLERANCES)
+# Most optimization trials per document: dropping shapes, one per tolerance, dropping shapes again.
+TRIALS = 2 + len(TOLERANCES)
 # CairoSVG resolves units and em lengths against its surface; these are the values of a fresh one.
 SURFACE = SimpleNamespace(dpi=96, font_size=16, context_width=0, context_height=0)
 GEOMETRY = {"rect": ("x", "y", "width", "height", "rx", "ry"), "circle": ("cx", "cy", "r"), "ellipse": ("cx", "cy", "rx", "ry"),
@@ -91,6 +91,20 @@ def shape_data(shape):
     return path_data(subpaths, shape.closed, shape.lines, decimals), decimals
 
 
+def painted_color(element, name):
+    """The color of the property `name` that the element paints with, declared on it or on its nearest ancestor, as (red, green, blue, alpha times 255), or None."""
+    return read_color(inherited([element, *element.iterancestors()], name, "") or "")
+
+
+def color_text(paint, painted):
+    """The fitted color of `paint` with the alpha of the color the element paints with."""
+    rgb = tuple(round(channel * 255) for channel in paint[:3])
+    alpha = painted[3] if painted else 255
+    if alpha != 255 and alpha == alpha.to_integral_value():
+        return "#%02x%02x%02x%02x" % (*rgb, int(alpha))
+    return rgba_text(rgb, alpha)
+
+
 def write_shape(element, shape):
     """Writes the geometry of the shape, in the user space of the element, and its fitted colors and stroke width."""
     if not shape.changed:
@@ -104,7 +118,7 @@ def write_shape(element, shape):
     if shape.fittable and shape.tune_color:
         for name, paint in (("fill", shape.fill), ("stroke", shape.stroke)):
             if paint is not None:
-                set_property(element, name, hex_color(paint))
+                set_property(element, name, color_text(paint, painted_color(element, name)))
     if shape.fittable and shape.tune_width and shape.stroke is not None:
         set_property(element, "stroke-width", number(shape.stroke_width / math.sqrt(abs(xx * yy - xy * yx)), decimals))
 
@@ -195,6 +209,33 @@ def fitted(scene):
     return Scene(scene.width, scene.height, [shape for shape in scene.shapes if shape.fittable])
 
 
+def drop_shapes(root, preceding, scene, fixed, dropped, reference, device, progress):
+    """Optimizes a copy of the scene without its cheapest removable fittable shapes that fit the
+    error budget left, never all of them. Returns the trial scene, the kept flags, the numbers of the
+    removed elements, the trial's fixed layers and its document, or None when no shape is dropped."""
+    fit = fitted(scene)
+    if not fit.shapes:
+        return None
+    nodes = list(elements(root))
+    referenced = {name for element in nodes for name in references(element)}
+    removable = np.array([nodes[shape.element].get("id") not in referenced for shape in fit.shapes], bool)
+    costs = np.where(removable, removal_costs(fit, fixed, reference), np.inf)
+    order = np.argsort(costs)
+    budget = ERROR_LIMIT - (render(fit, fixed, device) - reference).square().mean().item()
+    count = min(int((np.cumsum(costs[order]) <= budget).sum()), len(costs) - 1)
+    if not count:
+        return None
+    keep = np.ones(len(costs), bool)
+    keep[order[:count]] = False
+    gone = {shape.element for shape, kept in zip(fit.shapes, keep) if not kept}
+    trial = copy.deepcopy(scene)
+    trial.shapes = [shape for shape in trial.shapes if shape.element not in gone]
+    trial_fixed = without(fixed, keep, stack)
+    optimize(fitted(trial), trial_fixed, reference, STEPS)
+    progress()
+    return trial, keep, gone, trial_fixed, untagged(write_document(root, trial.shapes, dropped | gone), preceding)
+
+
 def simplify_svg(data, device, progress=lambda: None):
     """The input with its shapes simplified where they are, drawing within MIN_PSNR
     of its render, or None when nothing is simplified. Runs on `device` when it is
@@ -222,31 +263,15 @@ def simplify_svg(data, device, progress=lambda: None):
             document = untagged(copy.deepcopy(rounded), preceding)
             if len(document) < size and acceptable(document, reference):
                 best, size = document, len(document)
-        nodes = list(elements(root))
-        referenced = {name for element in nodes for name in references(element)}
-        removable = np.array([nodes[shape.element].get("id") not in referenced for shape in scene.shapes if shape.fittable], bool)
         runs = split_runs(scene)
         fixed = draw_runs(scene, runs, [None] * len(runs), root, preceding, set(), device)
         dropped = set()
-        fit = fitted(scene)
-        if fit.shapes:
-            costs = np.where(removable, removal_costs(fit, fixed, reference), np.inf)
-            order = np.argsort(costs)
-            budget = ERROR_LIMIT - (render(fit, fixed, device) - reference).square().mean().item()
-            count = min(int((np.cumsum(costs[order]) <= budget).sum()), len(costs) - 1)
-            if count:
-                keep = np.ones(len(costs), bool)
-                keep[order[:count]] = False
-                gone = {shape.element for shape, kept in zip(fit.shapes, keep) if not kept}
-                trial = copy.deepcopy(scene)
-                trial.shapes = [shape for shape in trial.shapes if shape.element not in gone]
-                trial_fixed = without(fixed, keep, stack)
-                optimize(fitted(trial), trial_fixed, reference, STEPS)
-                progress()
-                document = untagged(write_document(root, trial.shapes, gone), preceding)
-                if len(document) < size and acceptable(document, reference):
-                    best, size = document, len(document)
-                    scene, runs, fixed, dropped = trial, without(runs, keep, operator.add), trial_fixed, gone
+        attempt = drop_shapes(root, preceding, scene, fixed, dropped, reference, device, progress)
+        if attempt is not None:
+            trial, keep, gone, trial_fixed, document = attempt
+            if len(document) < size and acceptable(document, reference):
+                best, size = document, len(document)
+                scene, runs, fixed, dropped = trial, without(runs, keep, operator.add), trial_fixed, dropped | gone
         for tolerance in TOLERANCES:
             trial = copy.deepcopy(scene)
             straightened = any([straighten(shape, tolerance) for shape in trial.shapes if shape.editable])
@@ -259,5 +284,10 @@ def simplify_svg(data, device, progress=lambda: None):
             progress()
             document = untagged(write_document(root, trial.shapes, dropped), preceding)
             if len(document) < size and acceptable(document, reference):
+                attempt = drop_shapes(root, preceding, trial, trial_fixed, dropped, reference, device, progress)
+                if attempt is not None:
+                    smaller = attempt[4]
+                    if len(smaller) < len(document) and acceptable(smaller, reference):
+                        return smaller
                 return document
     return best

@@ -1,12 +1,11 @@
 """Basic shapes written as paths or circles, plain translates baked into coordinates, and removal of the stroke properties that draw nothing."""
 from decimal import Decimal, Inexact
 
-from .svg_attributes import number_list, set_names
+from .svg_attributes import set_names
 from .svg_document import SVG_NS, declared_in, element_cost, local_name, style_sets, svg_elements, use_targets
-from .svg_numbers import EXACT, format_number, parse_number
 from .svg_path import format_path, parse_path, translate_path
-from .svg_transform import as_translate, parse_transform
-from .svg_values import format_style, is_zero_length, parse_color, parse_style, set_property, shortest_color
+from .svg_values import (EXACT, as_translate, format_number, number_list, format_style, is_zero_length, parse_color, parse_number, parse_style,
+                         parse_transform, set_property, shortest_color)
 
 MARKERS = ("marker-start", "marker-mid", "marker-end", "marker")
 COORDINATES = {"line": ("x1", "y1", "x2", "y2"), "polyline": ("points",), "polygon": ("points",),
@@ -104,12 +103,15 @@ def points_segments(element, close):
     return segments + [("Z", ())] if close else segments
 
 
+def box_segments(left, top, right, bottom):
+    return [("M", (left, top)), ("L", (right, top)), ("L", (right, bottom)), ("L", (left, bottom)), ("Z", ())]
+
+
 def rect_segments(element):
     x, y, width, height = (coordinate(element, name) for name in ("x", "y", "width", "height"))
     if None in (x, y, width, height) or width <= 0 or height <= 0:
         return None
-    right, bottom = EXACT.add(x, width), EXACT.add(y, height)
-    return [("M", (x, y)), ("L", (right, y)), ("L", (right, bottom)), ("L", (x, bottom)), ("Z", ())]
+    return box_segments(x, y, EXACT.add(x, width), EXACT.add(y, height))
 
 
 def line_segments(element):
@@ -167,7 +169,7 @@ def translate_element(element, name, dx, dy, written):
         text = None if shifted is None else format_path(shifted)
         if text is None:
             return False
-        written[text] = text
+        written[text] = text, shifted
         element.set("d", text)
     elif name in ("polyline", "polygon"):
         values = number_list(element.get("points", ""))

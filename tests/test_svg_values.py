@@ -1,9 +1,61 @@
 import unittest
+from decimal import Decimal
 
 import package_alias  # noqa: F401
 from helpers import S, opt
-from svgoptimize.svg_values import (COLOR_KEYWORDS, INHERITED_PROPERTIES, PRESENTATION_ATTRIBUTES, format_style,
-                                    is_default, parse_style, shortest_color, shortest_length)
+from svgoptimize.svg_values import (COLOR_KEYWORDS, INHERITED_PROPERTIES, PRESENTATION_ATTRIBUTES, as_translate, format_number,
+                                    format_numbers, format_style, format_transform, is_default, join_numbers, parse_number,
+                                    parse_style, parse_transform, separator, shortest_color, shortest_length)
+
+
+class FormatNumberTests(unittest.TestCase):
+    def test_shortest_text(self):
+        cases = {"0.500": ".5", "-0.5": "-.5", "10.0": "10", "-0": "0", "0": "0",
+                 "1000": "1e3", "100": "100", "12000": "12e3", "1.5e3": "1500",
+                 "0.0001": "1e-4", "0.001": ".001", "0.00015": "15e-5", "123.456": "123.456",
+                 "-1000": "-1e3", "-0.0001": "-1e-4", "0.00012": "12e-5", "0.000123456": "123456e-9",
+                 "0.0001234567": ".0001234567", "1234000": "1234e3", "1E+3": "1e3", "5E-1": ".5",
+                 "0E+5": "0", "1.000": "1"}
+        for text, expected in cases.items():
+            self.assertEqual(format_number(Decimal(text)), expected, text)
+
+    def test_beyond_context_limits(self):
+        cases = {"1" * 1001: "1" * 1001, "1e9999999": "1e9999999", "-1.000e-9999999": "-1e-9999999",
+                 "1e999999999": "1e999999999", "-1e-999999999": "-1e-999999999"}
+        for text, expected in cases.items():
+            result = format_number(Decimal(text))
+            self.assertEqual(result, expected)
+            self.assertEqual(Decimal(result), Decimal(text))
+        self.assertEqual(format_number(Decimal("1" * 100005)), "1" * 100005)
+
+
+class SeparatorTests(unittest.TestCase):
+    def test_rules(self):
+        self.assertEqual(separator("1", "-2"), "")
+        self.assertEqual(separator(".5", ".5"), "")
+        self.assertEqual(separator("1e3", ".5"), "")
+        self.assertEqual(separator("1", ".5"), " ")
+        self.assertEqual(separator("-5", ".5"), " ")
+        self.assertEqual(separator("1", "2"), " ")
+        self.assertEqual(separator("", "2"), "")
+
+    def test_join(self):
+        self.assertEqual(join_numbers(["10", "-5", ".5", ".5", "3"]), "10-5 .5.5 3")
+        self.assertEqual(format_numbers([Decimal("0.5"), Decimal("-1"), Decimal("2")]), ".5-1 2")
+
+
+class ParseNumberTests(unittest.TestCase):
+    def test_grammar(self):
+        self.assertEqual(parse_number("+3"), 3)
+        self.assertEqual(parse_number("3."), 3)
+        self.assertEqual(parse_number("-.5e-2"), Decimal("-0.005"))
+        for bad in ("1e", "abc", "", "1 2"):
+            self.assertIsNone(parse_number(bad), bad)
+        self.assertIsNone(parse_number("٣"))
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 class ColorTests(unittest.TestCase):
@@ -78,3 +130,57 @@ class LengthStyleTests(unittest.TestCase):
         self.assertFalse(is_default("stroke-linecap", "Butt", "butt"))
         self.assertNotIn("opacity", INHERITED_PROPERTIES)
         self.assertNotIn("font", PRESENTATION_ATTRIBUTES)
+
+
+D = Decimal
+
+
+def fmt(text):
+    return format_transform(parse_transform(text))
+
+
+class TransformTests(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(parse_transform("translate(10,20) scale(2)"),
+                         [("translate", (D(10), D(20))), ("scale", (D(2),))])
+        for bad in ("translate()", "foo(1)", "matrix(1 2 3)", "translate(1"):
+            self.assertIsNone(parse_transform(bad), bad)
+        self.assertEqual(parse_transform(""), [])
+
+    def test_grammar(self):
+        expected = [("translate", (D(1),)), ("scale", (D(2),))]
+        for text in ("translate(1),scale(2)", "translate(1) , scale(2)", " translate( 1 )scale(2) "):
+            self.assertEqual(parse_transform(text), expected, text)
+        self.assertEqual(parse_transform("translate(1-2)"), [("translate", (D(1), D(-2)))])
+        self.assertEqual(parse_transform("translate(1.5.5)"), [("translate", (D("1.5"), D("0.5")))])
+        for bad in ("translate(1,,2)", "translate(1 2,)", "translate(,1)", "translate(1)scale(2),",
+                    ",translate(1)", "translate(1),,scale(2)", "Translate(1)", "translate(1) x",
+                    "translate(1 2 3)", "rotate(1 2)", "skewX(1 2)", "scale(1 2 3)"):
+            self.assertIsNone(parse_transform(bad), bad)
+
+    def test_shorter_forms(self):
+        cases = {"translate(10 0)": "translate(10)", "scale(2,2)": "scale(2)",
+                 "rotate(30,0,0)": "rotate(30)", "matrix(1,0,0,1,5,6)": "translate(5 6)",
+                 "matrix(2 0 0 3 0 0)": "scale(2 3)", "matrix(2 0 0 2 0 0)": "scale(2)",
+                 "matrix(1 0 0 1 0 0)": "", "translate(0) scale(1) rotate(0 5 5) skewX(0)": "",
+                 "translate(10.50, -3.0)": "translate(10.5-3)", "translate(1)  scale(2)": "translate(1) scale(2)"}
+        for text, expected in cases.items():
+            self.assertEqual(fmt(text), expected, text)
+
+    def test_identities(self):
+        for text in ("translate(0 0)", "scale(1 1)", "rotate(0 3 4)", "skewY(0)", "matrix(1 0 0 1 0 0)"):
+            self.assertEqual(fmt(text), "", text)
+        self.assertEqual(fmt("translate(0 5) skewX(1) skewY(2)"), "translate(0 5) skewX(1) skewY(2)")
+
+    def test_as_translate(self):
+        self.assertEqual(as_translate(parse_transform("translate(5)")), (D(5), D(0)))
+        self.assertEqual(as_translate(parse_transform("matrix(1 0 0 1 5 6)")), (D(5), D(6)))
+        self.assertEqual(as_translate(parse_transform("translate(5 6)")), (D(5), D(6)))
+        self.assertIsNone(as_translate(parse_transform("translate(1) scale(2)")))
+        self.assertIsNone(as_translate(parse_transform("scale(2)")))
+        self.assertIsNone(as_translate(parse_transform("matrix(1 0 0 2 5 6)")))
+        self.assertIsNone(as_translate([]))
+
+
+if __name__ == "__main__":
+    unittest.main()

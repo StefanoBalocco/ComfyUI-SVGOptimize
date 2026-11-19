@@ -1,8 +1,79 @@
-"""Shortest text for colors and lengths, style attribute parsing, and presentation attribute tables."""
+"""Parsing and writing of SVG values: numbers, colors, lengths, transforms and style declarations."""
+import colorsys
 import re
-from decimal import Decimal, Inexact
+from decimal import Context, Decimal, Inexact, InvalidOperation
 
-from .svg_numbers import EXACT, NUMBER, format_number, parse_number
+NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+SPACE = re.compile(r"[ \t\n\r\f]*")
+SEPARATOR = re.compile(r"[ \t\n\r\f]*(?:,[ \t\n\r\f]*)?")
+EXACT = Context(prec=1000, traps=[Inexact, InvalidOperation])
+
+
+def parse_number(text):
+    if NUMBER.fullmatch(text) is None:
+        return None
+    return Decimal(text)
+
+
+def scientific(value):
+    sign, digits, exponent = value.as_tuple()
+    digits = "".join(map(str, digits))
+    stripped = digits.rstrip("0")
+    exponent += len(digits) - len(stripped)
+    return f"{'-' if sign else ''}{stripped}e{exponent}"
+
+
+def format_number(value):
+    if value == 0:
+        return "0"
+    if abs(value.adjusted()) > 100000:
+        # compare lengths first so that huge plain text is only built when it is the shorter form
+        short = scientific(value)
+        digits, exponent = short.lstrip("-").split("e")
+        digits, exponent = len(digits), int(exponent)
+        if exponent >= 0:
+            plain = digits + exponent
+        elif -exponent >= digits:
+            plain = 1 - exponent
+        else:
+            plain = digits + 1
+        if len(short) < plain + (value < 0):
+            return short
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text.startswith("0."):
+        text = text[1:]
+    elif text.startswith("-0."):
+        text = "-" + text[2:]
+    unsigned = text.lstrip("-")
+    if (unsigned.endswith("000") and "." not in unsigned) or unsigned.startswith(".000"):
+        short = scientific(value)
+        if len(short) < len(text):
+            return short
+    return text
+
+
+def separator(previous, following):
+    if not previous or following.startswith("-"):
+        return ""
+    if following.startswith(".") and ("." in previous or "e" in previous):
+        return ""
+    return " "
+
+
+def join_numbers(texts):
+    out = []
+    previous = ""
+    for text in texts:
+        out.append(separator(previous, text) + text)
+        previous = text
+    return "".join(out)
+
+
+def format_numbers(values):
+    return join_numbers([format_number(value) for value in values])
+
 
 COLOR_KEYWORDS = {
     "aliceblue": "#f0f8ff", "antiquewhite": "#faebd7", "aqua": "#00ffff", "aquamarine": "#7fffd4",
@@ -84,6 +155,7 @@ GEOMETRY_DEFAULTS = {
 
 HEX_COLOR = re.compile(r"#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})", re.IGNORECASE)
 COLOR_FUNCTION = re.compile(r"rgba?\(([^()]*)\)", re.IGNORECASE)
+HSL_FUNCTION = re.compile(r"hsla?\(([^()]*)\)", re.IGNORECASE)
 CHANNEL_SEPARATOR = re.compile(r"[ \t\n\r\f]+")
 LENGTH = re.compile(rf"({NUMBER.pattern})(px|%|[a-zA-Z]+)?")
 ZERO_LENGTH = re.compile(r"[+-]?0*\.?0+(?:px|%|em|ex|in|cm|mm|pt|pc)?")
@@ -113,8 +185,8 @@ def alpha_in_255ths(text):
     return alpha if 0 <= alpha <= 255 else None
 
 
-def function_color(body):
-    """The color of the arguments of rgb() or rgba(), written with commas or with spaces and a slash."""
+def color_arguments(body):
+    """The three channels and the alpha list of the arguments of a color function, written with commas or with spaces and a slash, or None."""
     body = body.strip(CSS_SPACE)
     if "," in body:
         channels = [item.strip(CSS_SPACE) for item in body.split(",")]
@@ -123,8 +195,15 @@ def function_color(body):
         channels, slash, alpha = body.partition("/")
         channels = CHANNEL_SEPARATOR.split(channels.strip(CSS_SPACE))
         alpha = [alpha.strip(CSS_SPACE)] if slash else []
-    if len(channels) != 3 or len(alpha) > 1:
+    return (channels, alpha) if len(channels) == 3 and len(alpha) <= 1 else None
+
+
+def function_color(body):
+    """The color of the arguments of rgb() or rgba(), written with commas or with spaces and a slash."""
+    arguments = color_arguments(body)
+    if arguments is None:
         return None
+    channels, alpha = arguments
     if all(re.fullmatch("[0-9]+", channel) for channel in channels):
         values = tuple(int(channel) for channel in channels)
         if max(values) > 255:
@@ -158,6 +237,30 @@ def parse_color(text):
         return function_color(match.group(1))
     except Inexact:
         return None
+
+
+def hsl_color(body):
+    """The color of the arguments of hsl() or hsla() as bytes and the alpha times 255, or None."""
+    arguments = color_arguments(body)
+    if arguments is None:
+        return None
+    (hue, saturation, lightness), alpha = arguments
+    if not (saturation.endswith("%") and lightness.endswith("%")):
+        return None
+    values = [parse_number(hue[:-3] if hue.lower().endswith("deg") else hue), parse_number(saturation[:-1]), parse_number(lightness[:-1])]
+    alpha = alpha_in_255ths(alpha[0]) if alpha else Decimal(255)
+    if None in values or alpha is None:
+        return None
+    hue, saturation, lightness = (float(value) for value in values)
+    red, green, blue = colorsys.hls_to_rgb(hue / 360 % 1, min(max(lightness, 0), 100) / 100, min(max(saturation, 0), 100) / 100)
+    return round(red * 255), round(green * 255), round(blue * 255), alpha
+
+
+def read_color(text):
+    """`parse_color` that also reads hsl() and hsla(), rounding their channels to bytes."""
+    color = parse_color(text)
+    match = None if color else HSL_FUNCTION.fullmatch(text)
+    return hsl_color(match.group(1)) if match else color
 
 
 def hsl_text(rgb, opacity):
@@ -263,6 +366,17 @@ def format_style(declarations):
     return ";".join(f"{name}:{value}" for name, value in declarations)
 
 
+def convert_colors(name, value, convert):
+    """The value of the attribute `name` with `convert` applied to its colors: to the whole value of a color property, to each color declaration of a style; other values stay."""
+    if name in COLOR_PROPERTIES:
+        return convert(value)
+    if name == "style":
+        declarations = parse_style(value)
+        if declarations is not None:
+            return format_style([(key, convert(item) if key in COLOR_PROPERTIES else item) for key, item in declarations])
+    return value
+
+
 def set_property(element, name, value):
     """Sets a presentation property where the element declares it: in its style, else as an attribute."""
     declarations = parse_style(element.get("style", "")) or []
@@ -280,3 +394,103 @@ def is_default(name, value, default):
     if number is not None and default_number is not None:
         return number == default_number
     return value == default
+
+
+ARGUMENTS = {"matrix": (6,), "translate": (1, 2), "scale": (1, 2), "rotate": (1, 3), "skewX": (1,), "skewY": (1,)}
+TRANSFORM_NAME = re.compile(r"[A-Za-z]+")
+
+
+def parse_transform(text):
+    """Return the (name, arguments) items of a transform list, or None when it is malformed."""
+    items = []
+    pos = SPACE.match(text).end()
+    while pos < len(text):
+        name = TRANSFORM_NAME.match(text, pos)
+        if name is None or name.group() not in ARGUMENTS:
+            return None
+        pos = SPACE.match(text, name.end()).end()
+        if text[pos:pos + 1] != "(":
+            return None
+        pos = SPACE.match(text, pos + 1).end()
+        values = []
+        while True:
+            number = NUMBER.match(text, pos)
+            if number is None:
+                return None
+            values.append(Decimal(number.group()))
+            pos = number.end()
+            following = SEPARATOR.match(text, pos).end()
+            if NUMBER.match(text, following) is None:
+                break
+            pos = following
+        pos = SPACE.match(text, pos).end()
+        if text[pos:pos + 1] != ")" or len(values) not in ARGUMENTS[name.group()]:
+            return None
+        items.append((name.group(), tuple(values)))
+        following = SEPARATOR.match(text, pos + 1).end()
+        if following == len(text) and following > SPACE.match(text, pos + 1).end():
+            return None
+        pos = following
+    return items
+
+
+def shorten(name, values):
+    if name == "matrix":
+        a, b, c, d, e, f = values
+        if b == c == e == f == 0:
+            name, values = "scale", (a, d)
+        elif (a, b, c, d) == (1, 0, 0, 1):
+            name, values = "translate", (e, f)
+    if name == "translate" and len(values) == 2 and values[1] == 0:
+        values = values[:1]
+    elif name == "scale" and len(values) == 2 and values[0] == values[1]:
+        values = values[:1]
+    elif name == "rotate" and len(values) == 3 and values[1] == values[2] == 0:
+        values = values[:1]
+    return name, values
+
+
+def is_identity(name, values):
+    if name == "scale":
+        return all(v == 1 for v in values)
+    if name == "matrix":
+        return values == (1, 0, 0, 1, 0, 0)
+    return values[0] == 0 and (name != "translate" or len(values) == 1)
+
+
+def format_transform(items):
+    """Write the list in its shortest form; identity functions are dropped."""
+    parts = []
+    for name, values in items:
+        name, values = shorten(name, values)
+        if not is_identity(name, values):
+            parts.append(f"{name}({format_numbers(values)})")
+    return " ".join(parts)
+
+
+def as_translate(items):
+    """Return (x, y) when the list is a single translate, else None."""
+    if len(items) != 1:
+        return None
+    name, values = items[0]
+    if name == "translate":
+        return values[0], values[1] if len(values) == 2 else Decimal(0)
+    if name == "matrix" and values[:4] == (1, 0, 0, 1):
+        return values[4], values[5]
+    return None
+
+
+def number_list(text):
+    """The numbers of a whitespace or comma separated list, or None."""
+    values = []
+    position = SPACE.match(text).end()
+    while position < len(text):
+        match = NUMBER.match(text, position)
+        if match is None:
+            return None
+        values.append(Decimal(match.group()))
+        separator = SEPARATOR.match(text, match.end())
+        if "," in separator.group() and separator.end() == len(text):
+            return None
+        position = separator.end()
+    return values or None

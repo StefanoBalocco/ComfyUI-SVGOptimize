@@ -5,11 +5,13 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest import mock
 
 import torch
 
 import package_alias  # noqa: F401
 from helpers import gradient_document
+from svgoptimize.svg_optimize import optimize_svg
 from svgoptimize.svg_simplify import TRIALS
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -120,6 +122,22 @@ class OptimizeSVGTests(unittest.TestCase):
         document = b'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><path d="M0 0h30v20z" fill="#f00" fill-opacity=".5"/></svg>'
         self.assertIn(b'fill="red" fill-opacity=".5"', self.run_node([document])[0].getvalue())
         self.assertIn(b'fill="#ff000080"', self.run_node([document], simplify=True)[0].getvalue())
+
+    def test_simplify_runs_on_the_lossless_output_and_keeps_its_alpha(self):
+        document = gradient_document()
+        self.assertIn(b"#c42c", optimize_svg(document, False, True))
+        with mock.patch.object(sys.modules["svgoptimize.nodes"], "simplify_svg", wraps=sys.modules["svgoptimize.nodes"].simplify_svg) as simplify:
+            simplified = self.run_node([document], simplify=True)[0].getvalue()
+        self.assertEqual(simplify.call_args.args[0], optimize_svg(document, False, True))
+        self.assertRegex(simplified, rb"#[0-9a-f]{6}cc")
+
+    def test_simplify_error_keeps_the_lossless_output(self):
+        document = gradient_document()
+        with mock.patch.object(sys.modules["svgoptimize.nodes"], "simplify_svg", side_effect=ValueError("bad color")), self.assertLogs(level="WARNING") as logs:
+            out = self.run_node([document], simplify=True)[0].getvalue()
+        self.assertEqual(out, optimize_svg(document, False, True))
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("simplify", logs.output[0])
 
     def test_progress(self):
         documents = [(FIXTURES / "vtracer.svg").read_bytes(), b"not xml"]

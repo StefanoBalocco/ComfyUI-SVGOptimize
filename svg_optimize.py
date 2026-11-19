@@ -1,11 +1,11 @@
 """The optimizer entry point."""
 from lxml import etree
 
-from .svg_attributes import clean_values, format_geometry, remove_defaults, styles_to_attributes
+from .svg_attributes import clean_values, format_geometry, inline_stylesheet, remove_defaults, styles_to_attributes
 from .svg_document import clean_document, document_facts, parse_svg, serialize
 from .svg_shapes import apply_translates, convert_shapes, merge_opacities, remove_unused_strokes
 from .svg_structure import clean_ids, collapse_groups, paint_one_stop_gradients, remove_invisible
-from .svg_stylesheet import inline_stylesheet
+from .svg_viewport import crop_viewport
 
 
 def optimize_svg(data, keep_metadata, round_alpha=False):
@@ -23,6 +23,8 @@ def rewrite(root, preceding, round_alpha=False):
     facts = document_facts(root, preceding)
     previous = None
     written = {}
+    # The structural pass has run on `previous`.
+    settled = False
     # Each round is lossless, so stopping at the bound still gives a correct document.
     for _ in range(10):
         if not facts.stylesheet:
@@ -45,6 +47,14 @@ def rewrite(root, preceding, round_alpha=False):
         etree.cleanup_namespaces(root)
         output = serialize(root, preceding)
         if output == previous:
-            break
+            if settled or facts.stylesheet or facts.script or facts.animation:
+                break
+            crop_viewport(root, written)
+            settled = True
+            output = serialize(root, preceding)
+            if output == previous:
+                break
+        else:
+            settled = False
         previous = output
     return output

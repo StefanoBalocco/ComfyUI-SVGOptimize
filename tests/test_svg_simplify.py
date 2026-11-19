@@ -1,5 +1,6 @@
 """Simplification: raster size, fidelity to the input and what is rewritten."""
 from base64 import b64encode
+import copy
 from io import BytesIO
 import math
 from pathlib import Path
@@ -17,8 +18,8 @@ from svgoptimize import svg_fit
 from svgoptimize.svg_document import elements, parse_svg, serialize
 from svgoptimize.svg_fit import removal_costs, render
 from svgoptimize.svg_optimize import optimize_svg
-from svgoptimize.svg_scene import KEY, capture_svg
-from svgoptimize.svg_simplify import MIN_PSNR, draw_runs, fitted, is_uniform, raster_size, render_svg, simplify_svg, split_runs, stack, straighten, untagged, without, write_document
+from svgoptimize.svg_scene import KEY, cairo_colors, capture_svg
+from svgoptimize.svg_simplify import MIN_PSNR, color_text, draw_runs, drop_shapes, fitted, is_uniform, painted_color, raster_size, render_svg, simplify_svg, split_runs, stack, straighten, untagged, without, write_document
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CPU = torch.device("cpu")
@@ -35,6 +36,10 @@ def cairo_render(data, size):
 
 def psnr(a, b):
     return -10 * np.log10(np.mean((a - b) ** 2))
+
+
+def similarity(data, result, size):
+    return psnr(cairo_render(result, (size, size)), cairo_render(data, (size, size)))
 
 
 def by_id(data):
@@ -74,7 +79,7 @@ class SimplifyTests(unittest.TestCase):
         data = (FIXTURES / "vtracer.svg").read_bytes()
         result = simplify_svg(data, device)
         self.assertLess(len(optimize_svg(result, False)), len(optimize_svg(data, False)))
-        self.assertGreaterEqual(psnr(cairo_render(result, (256, 256)), cairo_render(data, (256, 256))), MIN_PSNR)
+        self.assertGreaterEqual(similarity(data, result, 256), MIN_PSNR)
         source, simplified = etree.fromstring(data), etree.fromstring(result)
         self.assertEqual(dict(simplified.attrib), dict(source.attrib))
         paths = simplified.findall("{*}path")
@@ -96,7 +101,7 @@ class SimplifyTests(unittest.TestCase):
         result = simplify_svg(data, CPU)
         self.assertLess(len(result), len(data))
         self.assertIn(b'd="M27.042 10.5h7.5v31h-7.5z"', result)
-        self.assertGreaterEqual(psnr(cairo_render(result, (512, 512)), cairo_render(data, (512, 512))), MIN_PSNR)
+        self.assertGreaterEqual(similarity(data, result, 512), MIN_PSNR)
 
     def test_basic_shapes_are_not_rounded(self):
         self.assertIsNone(simplify_svg(svg('width="48" height="48"', '<rect x="27.042373" y="10.5" width="7.5" height="31" fill="#f39c12"/>'), CPU))
@@ -109,7 +114,7 @@ class SimplifyTests(unittest.TestCase):
         with self.assertNoLogs(level="WARNING"):
             result = simplify_svg(data, CPU)
         self.assertLess(len(result), len(data))
-        self.assertGreaterEqual(psnr(cairo_render(result, (512, 512)), cairo_render(data, (512, 512))), MIN_PSNR)
+        self.assertGreaterEqual(similarity(data, result, 512), MIN_PSNR)
         source, simplified = by_id(data), by_id(result)
         for name in ("g", "panel", "label"):
             self.assertEqual(etree.tostring(simplified[name], with_tail=False), etree.tostring(source[name], with_tail=False))
@@ -128,7 +133,7 @@ class SimplifyTests(unittest.TestCase):
         for name in ("m", "t", "u", "mk", "img", "label"):
             self.assertEqual(etree.tostring(simplified[name], with_tail=False), etree.tostring(source[name], with_tail=False), name)
         self.assertEqual(simplified["a"].tag.rpartition("}")[2], "path")
-        self.assertGreaterEqual(psnr(cairo_render(result, (512, 512)), cairo_render(data, (512, 512))), MIN_PSNR)
+        self.assertGreaterEqual(similarity(data, result, 512), MIN_PSNR)
 
     def test_stylesheet_keeps_colors(self):
         data = gradient_document(middle='<style>.c{fill:#2a6}</style>').replace(b'id="a"', b'id="a" class="c"').replace(b'fill="#2a6"', b"")
@@ -143,6 +148,27 @@ class SimplifyTests(unittest.TestCase):
         result = by_id(simplify_svg(data, CPU))
         self.assertIn("kept", result)
         self.assertNotIn("gone", result)
+
+    def test_drop_shapes_on_a_scene_after_a_drop(self):
+        dots = '<circle id="dot1" cx="50" cy="20" r="0.2" fill="#000"/><circle id="dot2" cx="52" cy="20" r="0.2" fill="#000"/>'
+        data = gradient_document(middle=dots).replace(b'<text id="label" x="10" y="95" font-size="10">Hi</text>', b"")
+        root, preceding, scene = scene_of(data)
+        nodes = list(elements(root))
+        runs = split_runs(scene)
+        fixed = draw_runs(scene, runs, [None] * len(runs), root, preceding, set(), CPU)
+        reference = render_svg(data, scene.width, scene.height, CPU)
+        # A scene from an earlier drop that took dot1 only.
+        keep = np.array([nodes[shape.element].get("id") != "dot1" for shape in fitted(scene).shapes])
+        dropped = {shape.element for shape in scene.shapes if nodes[shape.element].get("id") == "dot1"}
+        trial = copy.deepcopy(scene)
+        trial.shapes = [shape for shape in trial.shapes if shape.element not in dropped]
+        calls = []
+        again, kept, gone, _, document = drop_shapes(root, preceding, trial, without(fixed, keep, stack), dropped, reference, CPU, lambda: calls.append(1))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(kept), len(fitted(trial).shapes))
+        self.assertEqual({nodes[index].get("id") for index in gone}, {"dot2"})
+        self.assertEqual(len(fitted(again).shapes), kept.sum())
+        self.assertEqual(set(by_id(document)) & {"dot1", "dot2"}, set())
 
 
 def path_data(data):
@@ -161,20 +187,50 @@ def near_straight_polygon(count, offset):
     return svg('viewBox="0 0 100 100"', f'<path d="{d}z" fill="#2a6"/>')
 
 
+class ColorTests(unittest.TestCase):
+    def pixel(self, color, style=False):
+        paint = f'style="fill:{color}"' if style else f'fill="{color}"'
+        data = cairo_colors(svg('width="4" height="4"', f'<rect width="4" height="4" {paint}/>'))
+        return np.round(cairo_render(data, (4, 4))[0, 0] * 255).astype(int)
+
+    def test_colors_are_written_as_cairosvg_reads_them(self):
+        for color, expected in (("#c42c", (214, 105, 78)), ("#cc4422cc", (214, 105, 78)), ("rgba(204,68,34,20%)", (245, 218, 211)), ("rgb(41 163 102)", (41, 163, 102)),
+                                ("rgb(41 163 102 / 50%)", (148, 209, 178)), ("rgba(41,163,102,.5)", (148, 209, 178)), ("hsl(150 60% 40%)", (41, 163, 102)),
+                                ("hsla(150deg, 60%, 40%, .5)", (148, 209, 178)), ("hsl(150deg 60% 40% / 50%)", (148, 209, 178)), ("hsl(0 100% 50%)", (255, 0, 0)),
+                                ("#0000", (255, 255, 255)), ("red", (255, 0, 0))):
+            for style in (False, True):
+                with self.subTest(color=color, style=style):
+                    np.testing.assert_allclose(self.pixel(color, style), expected, atol=1)
+
+    def test_other_values_stay(self):
+        data = svg('width="4"', '<g fill="currentColor" style="stroke:url(#g);fill:none"><rect fill="rgb(1.5 2 3)"/></g>')
+        self.assertEqual(cairo_colors(data), data)
+
+    def test_declared_colors_are_captured(self):
+        for color, expected in (("hsl(150 60% 40%)", (41, 163, 102, 1)), ("rgb(41 163 102)", (41, 163, 102, 1)), ("#c42c", (204, 68, 34, 0.8))):
+            with self.subTest(color=color):
+                _, _, scene = scene_of(svg('width="4" height="4"', f'<rect width="4" height="4" fill="{color}"/>'))
+                np.testing.assert_allclose(scene.shapes[0].fill, [value / 255 for value in expected[:3]] + [expected[3]], atol=1e-3)
+
+    def test_alpha_of_a_hex_color_is_kept(self):
+        root, _, scene = scene_of(svg('width="4" height="4"', '<rect width="4" height="4" fill="#c42c"/>'))
+        element = list(elements(root))[scene.shapes[0].element]
+        self.assertEqual(color_text(scene.shapes[0].fill, painted_color(element, "fill")), "#cc4422cc")
+
+
 class StraightenTests(unittest.TestCase):
-    def test_nearly_straight_cubics_become_lines(self):
-        data = near_straight_polygon(40, 0.004)
+    def check_straightened(self, offset):
+        data = near_straight_polygon(40, offset)
         result = simplify_svg(data, CPU)
         self.assertLess(len(result), len(optimize_svg(data, False)))
         self.assertNotRegex(path_data(optimize_svg(result, False)), r"[CcSsQqTt]")
-        self.assertGreaterEqual(psnr(cairo_render(result, (512, 512)), cairo_render(data, (512, 512))), MIN_PSNR)
+        self.assertGreaterEqual(similarity(data, result, 512), MIN_PSNR)
+
+    def test_nearly_straight_cubics_become_lines(self):
+        self.check_straightened(0.004)
 
     def test_refined_straight_edges_are_recovered(self):
-        data = near_straight_polygon(40, 0.06)
-        result = simplify_svg(data, CPU)
-        self.assertLess(len(result), len(optimize_svg(data, False)))
-        self.assertNotRegex(path_data(optimize_svg(result, False)), r"[CcSsQqTt]")
-        self.assertGreaterEqual(psnr(cairo_render(result, (512, 512)), cairo_render(data, (512, 512))), MIN_PSNR)
+        self.check_straightened(0.06)
 
     def test_segments_beyond_the_tolerance_or_out_of_order_stay_curves(self):
         root, preceding, scene = scene_of(svg('viewBox="0 0 100 100"', '<path d="M10 10C30 12 50 8 70 10C90 10 40 10 20 10C30 30 40 20 50 50C60 60 55 55 80 80" fill="#000"/>'))
@@ -263,7 +319,9 @@ class CompositeTests(unittest.TestCase):
         expected = inputs[2]
         for alpha, color in zip(*inputs[:2]):
             expected = expected + alpha * (color[:, None, None] - expected)
-        out = composite(*inputs)
+        boxes = torch.tensor([[0, 0, 9, 8]] * 5, dtype=torch.int32, device=device)
+        starts = torch.arange(6, device=device) * 72
+        out = composite(inputs[0].reshape(-1), inputs[1], inputs[2], boxes, starts, 0)
         torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-5)
         for grad, expected_grad in zip(torch.autograd.grad((out * weights).sum(), inputs), torch.autograd.grad((expected * weights).sum(), inputs)):
             torch.testing.assert_close(grad, expected_grad, rtol=1e-4, atol=1e-5)

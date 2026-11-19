@@ -133,7 +133,20 @@ class OpacityMergeTests(unittest.TestCase):
         self.assertEqual(opt(f'<svg {S}><path d="M0 0h9v9z" fill="red" fill-opacity="0"/></svg>'), f'<svg {S}><path d="M0 0h9v9z" fill="#f000"/></svg>')
 
 
-class ZeroWidthStrokeTests(unittest.TestCase):
+class StrokeRemovalTests(unittest.TestCase):
+    def check_removed(self, cases):
+        for before, after in cases:
+            with self.subTest(before):
+                self.assertEqual(run(remove_unused_strokes, f'<svg {S}>{before}</svg>'), f'<svg {S}>{after}</svg>')
+
+    def check_unchanged(self, docs):
+        for doc in docs:
+            with self.subTest(doc):
+                text = f'<svg {S}>{doc}</svg>'
+                self.assertEqual(run(remove_unused_strokes, text), text)
+
+
+class ZeroWidthStrokeTests(StrokeRemovalTests):
     def test_removed(self):
         cases = [
             ('<path d="M0 0h1" stroke="#123456" stroke-width="0" stroke-linejoin="round" stroke-dasharray="1 2" fill="red"/>',
@@ -152,12 +165,10 @@ class ZeroWidthStrokeTests(unittest.TestCase):
             ('<defs><g id="a"><path d="M0 0h1" stroke="red" stroke-width="0"/></g></defs><use href="#a" stroke="blue"/>',
              '<defs><g id="a"><path d="M0 0h1" stroke-width="0"/></g></defs><use href="#a" stroke="blue"/>'),
         ]
-        for before, after in cases:
-            with self.subTest(before):
-                self.assertEqual(run(remove_unused_strokes, f'<svg {S}>{before}</svg>'), f'<svg {S}>{after}</svg>')
+        self.check_removed(cases)
 
     def test_unchanged(self):
-        for doc in ('<marker id="m"/><path d="M0 0h1" stroke="red" stroke-width="0" marker-end="url(#m)"/>',
+        self.check_unchanged(('<marker id="m"/><path d="M0 0h1" stroke="red" stroke-width="0" marker-end="url(#m)"/>',
                     '<g stroke="red" stroke-width="0"><path d="M0 0h1" stroke-width="2"/></g>',
                     '<text stroke="red" stroke-width="0">a</text>',
                     '<path d="M0 0h1" stroke="red" stroke-width=".1"/>',
@@ -165,16 +176,13 @@ class ZeroWidthStrokeTests(unittest.TestCase):
                     '<path d="M2 9h30" stroke="#00f" stroke-width="0foo"/>',
                     '<path d="M2 9h30" stroke="#00f" stroke-width=" 0"/>',
                     '<path d="M0 0h1" stroke="red" stroke-width="0" style="stroke-width:2"/>',
-                    '<path d="M0 0h1" stroke="red" stroke-width="0" style="/*x*/fill:red"/>'):
-            with self.subTest(doc):
-                text = f'<svg {S}>{doc}</svg>'
-                self.assertEqual(run(remove_unused_strokes, text), text)
+                    '<path d="M0 0h1" stroke="red" stroke-width="0" style="/*x*/fill:red"/>'))
 
     def test_stylesheet_keeps_stroke(self):
         self.assertIn('stroke="red"', opt(f'<svg {S}><style>path{{stroke-width:2}}@media print{{}}</style><path d="M0 0h1" stroke="red" stroke-width="0"/></svg>'))
 
 
-class UnstrokedShapeTests(unittest.TestCase):
+class UnstrokedShapeTests(StrokeRemovalTests):
     def test_removed(self):
         cases = [
             ('<path d="M0 0h1" fill="red" stroke-width="3" stroke-linecap="round" stroke-linejoin="bevel" stroke-miterlimit="2" stroke-dasharray="1 2" stroke-dashoffset="1" stroke-opacity=".5"/>',
@@ -185,21 +193,16 @@ class UnstrokedShapeTests(unittest.TestCase):
             ('<marker id="m"/><path d="M0 0h1" stroke-width="3" stroke-linecap="round" marker-end="url(#m)"/>', '<marker id="m"/><path d="M0 0h1" stroke-width="3" marker-end="url(#m)"/>'),
             ('<circle r="1" stroke-width="3"/>', '<circle r="1"/>'),
         ]
-        for before, after in cases:
-            with self.subTest(before):
-                self.assertEqual(run(remove_unused_strokes, f'<svg {S}>{before}</svg>'), f'<svg {S}>{after}</svg>')
+        self.check_removed(cases)
 
     def test_unchanged(self):
-        for doc in ('<path d="M0 0h1" stroke="red" stroke-width="3" stroke-linecap="round"/>',
+        self.check_unchanged(('<path d="M0 0h1" stroke="red" stroke-width="3" stroke-linecap="round"/>',
                     '<path d="M0 0h1" style="stroke:red;stroke-width:3"/>',
                     '<g stroke="red"><path d="M0 0h1" stroke-width="3" stroke-linecap="round"/></g>',
                     '<g style="stroke:red"><path d="M0 0h1" stroke-width="3"/></g>',
                     '<defs><path id="p" d="M0 0h1" stroke-width="3"/></defs><use href="#p" stroke="blue"/>',
                     '<defs><g id="g"><path d="M0 0h1" stroke-width="3"/></g></defs><use href="#g" stroke="blue"/>',
-                    '<path d="M0 0h1" stroke-width="3" style="/*x*/fill:red"/>'):
-            with self.subTest(doc):
-                text = f'<svg {S}>{doc}</svg>'
-                self.assertEqual(run(remove_unused_strokes, text), text)
+                    '<path d="M0 0h1" stroke-width="3" style="/*x*/fill:red"/>'))
 
     def test_stylesheet_and_animation_keep_properties(self):
         self.assertIn("stroke-width", opt(f'<svg {S}><style>path{{stroke:red}}@media print{{}}</style><path d="M0 0h1" stroke-width="3"/></svg>'))

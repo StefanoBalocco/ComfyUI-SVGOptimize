@@ -1,6 +1,6 @@
 # ComfyUI-SVGOptimize
 
-An SVG optimizer node for ComfyUI. It rewrites each SVG of a batch into fewer bytes. Coordinates are computed with exact decimal arithmetic, and every rewrite is one the SVG specification defines as equivalent, so the document draws the same image. An optional `simplify` step first rounds path data, merges path segments, re-fits and drops shapes in place, keeping the drawing within 45 dB PSNR of a render of the input. It works with the native `SVG` type from any source, such as StarVector or VTracer output.
+An SVG optimizer node for ComfyUI. It rewrites each SVG of a batch into fewer bytes. Coordinates are computed with exact decimal arithmetic, and every rewrite is one the SVG specification defines as equivalent, so the document draws the same image. An optional `simplify` step runs on the lossless output: it rounds path data, merges path segments, re-fits and drops shapes in place, keeping the drawing within 45 dB PSNR of a render of that output, and a second lossless run follows. It works with the native `SVG` type from any source, such as StarVector or VTracer output.
 
 ## Install
 
@@ -19,7 +19,7 @@ The lossless rewrites need `lxml`, `tinycss2` and `cssselect2`. Simplify also us
 
 - Input `svg`: the SVG documents to rewrite.
 - Input `keep_metadata` (default off): keeps `<metadata>`, `<title>` and `<desc>`. When off, all three are removed.
-- Input `simplify` (default off): lossy simplification before the lossless rewrites. See Simplify.
+- Input `simplify` (default off): lossy simplification between two lossless runs. See Simplify.
 - Output `svg`: one UTF-8 document per input document, starting at the `<svg>` element.
 
 The progress bar advances with each document and, with `simplify` on, with each optimization trial of 100 steps.
@@ -56,6 +56,16 @@ Shapes:
 - `line`, `polyline` and `polygon` become `path` when shorter.
 - A plain `rect` becomes `path` when shorter and the document has no marker property.
 - An `ellipse` with equal radii becomes `circle`.
+
+Viewport and hidden shapes:
+
+- The viewport is known when the root `svg` has a `viewBox` and a `width` and `height` in the same unit with its aspect ratio, or plain `width` and `height` and no `viewBox`, and no `overflow` other than `hidden` or `scroll`. Nothing outside it is drawn at the declared size, so the rewrites below draw the same image; an embedding that changes the aspect ratio also shows the user space around the viewBox, where they can change what is drawn.
+- A cover is a path with no stroke and no `id`, whose `style` sets no `d`, whose ancestors up to the root are `g` elements without `id`, and with no `transform`, `filter`, `mask`, `clip-path` or `url()` reference on it or an ancestor. An opaque cover also has a solid fill with full alpha and `fill-opacity`, and no `opacity` below 1, `mix-blend-mode`, `display:none`, hidden `visibility` or conditional processing attribute on it or an ancestor.
+- A cover that fills the whole viewport, alone or with the opaque covers after it, becomes the viewport rectangle when that is shorter, such as `M-2-2l515.1-.3-.3 515.5-514.7-.1z` in a 512 by 512 viewBox becoming `M0 0h512v512H0z`. What it adds lies under the opaque covers.
+- Elements painted before an opaque cover that fills the whole viewport, alone or with the opaque covers after it, are removed when nothing references them or an element inside them. Definitions stay.
+- A `path`, `rect`, `circle`, `ellipse`, `line`, `polyline` or `polygon` with no `id`, `transform`, `filter` or marker property, whose ancestors up to the root are `g` elements without `id`, `transform` or `filter`, is removed when its paint lies outside the viewport, or when the opaque covers after it fill every point of its paint within the viewport, or of all its paint when the viewport is not known. Its paint is its points, widened when it has a stroke by half the stroke width times the larger of the miter limit and 1.5.
+- The fill test is exact. The area is split into cells, and a cell is filled when one cover fills it, or when the straight edges of several do, with the winding number of every region between the edges computed in rational arithmetic under the fill rule of each cover. A curve counts as its control polygon where a line separates its control points from the cell, as its chord where it is straight, and otherwise is split in halves up to four times; a cell that is not proven is split in four, up to 16 times. Covers fill a cell together where they overlap or meet along straight edges.
+- These rewrites run once the other rewrites leave the output unchanged, and the other rewrites run again when they change the document. Documents with `foreignObject` keep the elements they would remove.
 
 Path data:
 
@@ -104,11 +114,14 @@ Documents whose stylesheet is not inlined (`<style>` or `xml-stylesheet`), and d
 - With a marker property, hidden paths, lines, polylines and polygons stay.
 - With a marker property, stroke properties of zero-width strokes stay, and `stroke-width` stays on shapes whose stroke is `none`.
 - Inherited defaults inside a subtree that a `<use>` references stay.
+- With a stylesheet, script or SMIL animation, covers keep their geometry, and shapes outside the viewport or below covers stay.
 - Translates stay in `transform` with SMIL animation elements and on elements a `<use>` references, directly or through an ancestor.
 
 ## Simplify
 
-With `simplify` on, each document first has its shapes simplified where they are, staying within 45 dB PSNR of the CairoSVG render of the input. The lossless rewrites then run on the simplified document, and the node outputs the shorter of the lossless output of the input and the lossless output of the simplified document. A document where no simplified candidate is acceptable and smaller is left to the lossless rewrites.
+With `simplify` on, the lossless rewrites run first. Simplify then runs on their output, which draws the same image as the input, and has the shapes simplified where they are, staying within 45 dB PSNR of the CairoSVG render of that output. The lossless rewrites run again on the simplified document, and the node outputs the shorter of the two lossless outputs. A document where no simplified candidate is acceptable and smaller keeps its first lossless output, and so does one that simplify cannot read, with one warning.
+
+CairoSVG renders colors written as hex with alpha, `rgb()` with spaces and `hsl()` wrongly or not at all. In the documents it renders, simplify first rewrites the colors of attributes and `style` declarations as `#rrggbb` or `rgba()`. A fitted color keeps the alpha of the color the shape paints with: `#rrggbb`, `#rrggbbaa` or `rgba()`.
 
 Both lossless runs also round the alpha of colors to the nearest 1/255, so `rgba(255,0,0,.5)` becomes `#ff000080` and `fill="#f00" fill-opacity=".5"` becomes `fill="#ff000080"`, where the merge conditions of Rewrites hold and the text is shorter. This is not checked against the 45 dB limit: CairoSVG ignores the alpha of `#rrggbbaa`, and the change is at most 1/510 of the alpha, below the 8-bit resolution renderers composite with.
 
@@ -125,25 +138,26 @@ Procedure:
 
 - Straightening comes first: each cubic segment of an editable shape whose control points lie within 0.05 px of its chord, in order along it, becomes a straight segment with its control points at 1/3 and 2/3 of the chord. The rounding candidate writes it as a line, and the fits keep it straight.
 - Rounding comes first: each editable `path` that the capture recorded as one shape has its `d` rewritten from the captured geometry with the decimals that keep each point within about 0.05 px of the raster, wherever that is shorter than its current `d`. Basic shapes stay as written. When the result is acceptable and smaller, it is the best candidate so far; the steps below start from the input and must beat it.
-- The raster is the CairoSVG render of the input on white, 512 px on the longest side whatever the document declares. It keeps the aspect ratio CairoSVG renders from the document's width and height, or from its viewBox when width and height are missing, and is square when the document declares no size. Absolute units are converted to px; percentages and missing values are ignored.
+- The raster is the CairoSVG render of the document simplify receives on white, 512 px on the longest side whatever the document declares. It keeps the aspect ratio CairoSVG renders from the document's width and height, or from its viewBox when width and height are missing, and is square when the document declares no size. Absolute units are converted to px; percentages and missing values are ignored.
 - CairoSVG captures every shape at that size as cubic Beziers with its fill, stroke, clip and the element it comes from.
 - A candidate is acceptable when the CairoSVG render of its written SVG is at least 45 dB PSNR from the render of the input and its SVG is smaller than the best candidate so far, the first being the input.
 - Drop shapes: the cost of each removable shape is the increase of the mean squared error if it alone were removed. The cheapest shapes are dropped while the current error plus their summed costs stays within the 45 dB limit, never all the fittable ones. The remaining fittable shapes are optimized for 100 Adam steps toward the render of the input, and the result is kept if it is acceptable.
 - Merge segments: at each tolerance below, the cubic segments of editable shapes whose control points lie within the tolerance of their chord, in order along it, are first made straight. Then adjacent straight segments, or adjacent curved segments, of editable shapes merge into one while the outline stays within a tolerance of 1.0, then 0.5, then 0.25 px of the original, in units of the 512 px raster. Each tolerance is optimized for 100 steps and written; the first acceptable result is kept, and the search stops when a tolerance straightens and merges nothing.
+- Drop shapes again: when a merged result is acceptable, the same drop runs on its scene, with the budget left under the 45 dB limit by its error. The result is returned if it is acceptable and smaller than the merged one, otherwise the merged result is.
 
-The optimization uses a differentiable rasterizer: per pixel, the distance to each paint layer's outline and its winding number give an anti-aliased coverage, and layers composite source-over in paint order, between the fixed layers.
+The optimization uses a differentiable rasterizer: per pixel, the distance to each paint layer's outline and its winding number give an anti-aliased coverage, and layers composite source-over in paint order, between the fixed layers. Each layer is computed and stored only over the pixels of its bounding box, grown by the reach of its stroke.
 
 Measured on an RTX 3060 (GPU) and with 5 CPU threads (CPU), sizes of the lossless output without and with simplify:
 
 | Documents | Without | With | PSNR | GPU | CPU |
 |---|---|---|---|---|---|
-| A watercolor refined by ComfyUI-VTracer | 378 KB | 116 KB | 46.1 dB | 7.4 s | 203 s |
-| VTracer's trace of the same watercolor | 134 KB | 65 KB | 45.6 dB | 7.0 s | 196 s |
-| VTracer's traces of six flat icons | 0.4-7.5 KB | 0.3-1.0 KB | 46.6-48.8 dB | 0.5-2.0 s | 4-15 s |
-| StarVector's SVGs of the same icons | 191-442 B | 191-442 B | - | 0.0-2.9 s | 0.1-13 s |
-| Two VTracer traces (watercolor, one icon) with a gradient panel and text added | 134 KB, 4.0 KB | 65 KB, 1.2 KB | 45.6 dB, 47.8 dB | 7.7 s, 0.9 s | 220 s, 6.7 s |
+| A watercolor refined by ComfyUI-VTracer | 378 KB | 112 KB | 45.6 dB | 6.0 s | 55 s |
+| VTracer's trace of the same watercolor | 134 KB | 61 KB | 45.8 dB | 4.4 s | 51 s |
+| VTracer's traces of six flat icons | 0.4-18 KB | 0.3-1.0 KB | 46.6-48.7 dB | 0.4-1.3 s | 2.1-13 s |
+| StarVector's SVGs of the same icons | 191-442 B | 191-429 B | 73-120 dB | 0.0-1.6 s | 0.1-8.4 s |
+| Two VTracer traces (watercolor, one icon) with a gradient panel and text added | 134 KB, 8.1 KB | 61 KB, 1.0 KB | 45.8 dB, 47.8 dB | 4.7 s, 0.5 s | 48 s, 2.6 s |
 
-Text is rendered with grayscale antialiasing in the reference, the fixed layers and the candidates, so it adds no error to the fit. On StarVector's icons, five come out unchanged, because no simplified candidate is shorter; one gains 16 B from rounding.
+Text is rendered with grayscale antialiasing in the reference, the fixed layers and the candidates, so it adds no error to the fit. On StarVector's icons, four come out unchanged, because no simplified candidate is shorter; two gain 9 B and 13 B.
 
 ## Relative coordinates
 
